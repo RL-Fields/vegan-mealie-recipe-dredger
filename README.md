@@ -225,6 +225,31 @@ Upstream's settings all still apply — `TARGET_RECIPES_PER_SITE`, `SCAN_DEPTH`,
 | `FIBRE_HIGH` / `FIBRE_MED` | `8` / `4` | g per serving |
 | `CAL_HIGH` / `CAL_MED` | `700` / `400` | kcal per serving |
 
+### Adding sites from a text file
+
+Set `EXTRA_SITES_FILE` and the dredger reads extra sites from a plain text file
+each run, on top of `sites_vegan.json`. One URL per line; blank lines and
+anything after a `#` are ignored, and a bare domain gets `https://` added:
+
+```
+# tried these, worth a look
+https://newveganblog.com
+anotherblog.co.uk        # bare domain is fine
+```
+
+Useful when the file lives on a network share, so sites can be added from any
+machine without touching the repo. `EXTRA_SITES_DIR` is the folder on the
+Docker host that gets mounted into the container at `/extra`:
+
+```
+EXTRA_SITES_DIR=/mnt/media/recipes
+EXTRA_SITES_FILE=/extra/_sites.txt
+```
+
+Duplicates of sites already in `sites_vegan.json` are ignored, and a missing
+file is a warning rather than an error, so a run never fails because the share
+was unavailable. New sites are named in the log at startup.
+
 ### Site list
 
 `sites_vegan.json` replaces upstream's 149 mixed-diet blogs with ~45 fully

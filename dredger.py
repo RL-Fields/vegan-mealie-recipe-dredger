@@ -27,6 +27,9 @@ from datetime import datetime, timedelta
 # --- CONSTANTS ---
 VERSION = "1.0.0-beta.11"
 
+# --- EXTRA SITES FILE (optional, e.g. a text file on a network share) ---
+EXTRA_SITES_FILE = os.getenv('EXTRA_SITES_FILE', '').strip()
+
 # --- VEGAN / PROTEIN ADD-ON ---
 import vegan_filter
 
@@ -838,6 +841,36 @@ def load_sites_from_source(source_path: str = None) -> List[str]:
     # 4. Defaults (The Full Curated List)
     return DEFAULT_SITES
 
+def load_extra_sites(path: str) -> List[str]:
+    """Read additional site URLs from a plain text file.
+
+    One URL per line. Blank lines and anything after a # are ignored, so the
+    file can be annotated. A bare domain gets https:// added. Missing file is
+    not an error — it just means nothing extra this run.
+    """
+    if not path:
+        return []
+    if not os.path.exists(path):
+        logger.warning(f"   EXTRA_SITES_FILE not found: {path}")
+        return []
+
+    sites = []
+    try:
+        with open(path, 'r', encoding='utf-8-sig', errors='replace') as fh:
+            for raw in fh:
+                line = raw.split('#', 1)[0].strip()
+                if not line:
+                    continue
+                if not line.startswith(('http://', 'https://')):
+                    line = 'https://' + line
+                sites.append(line.rstrip('/'))
+    except Exception as e:
+        logger.error(f"   Could not read EXTRA_SITES_FILE {path}: {e}")
+        return []
+
+    return sites
+
+
 def main():
     parser = argparse.ArgumentParser(description="Recipe Dredger: Intelligent Scraper")
     parser.add_argument("--dry-run", action="store_true", help="Scan without importing")
@@ -860,6 +893,16 @@ def main():
     check_connectivity(session)
     
     sites_list = load_sites_from_source(args.sites)
+
+    extra = load_extra_sites(EXTRA_SITES_FILE)
+    if extra:
+        known = {s.rstrip('/') for s in sites_list}
+        added = [s for s in extra if s not in known]
+        sites_list += added
+        logger.info(f"   📄 {len(extra)} site(s) in {EXTRA_SITES_FILE}"
+                    f"{f', {len(added)} new' if added else ' (all already listed)'}")
+        for s in added:
+            logger.info(f"      + {s}")
 
     logger.info(f"🍲 Recipe Dredger Started ({VERSION})")
     logger.info(f"   Mode: {'DRY RUN' if DRY_RUN_MODE else 'LIVE IMPORT'}")

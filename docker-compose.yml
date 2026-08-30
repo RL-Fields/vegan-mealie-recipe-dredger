@@ -11,6 +11,9 @@ services:
     volumes:
       - ./data:/app/data                    # Persistent data (imported.json, rejects.json, etc.)
       - ./sites_vegan.json:/app/sites.json:ro   # Vegan-only site list (read-only)
+      # Optional: a text file of extra sites, e.g. on a network share.
+      # Set EXTRA_SITES_FILE=/extra/_sites.txt in .env to use it.
+      - ${EXTRA_SITES_DIR:-./data}:/extra:ro
     
     restart: "no"
     
