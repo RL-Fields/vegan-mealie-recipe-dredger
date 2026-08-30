@@ -1,400 +1,246 @@
-# 🍲 Recipe Dredger (Mealie & Tandoor)
+# 🌱 Vegan Recipe Dredger
 
-A bulk-import automation tool to populate your self-hosted recipe managers with high-quality recipes.
+Bulk-imports vegan recipes into [Mealie](https://mealie.io), with macros and
+categories filled in automatically.
 
-> **⚠️ Note regarding Tandoor:** This script was built and tested specifically for **Mealie**. Tandoor support was added via community request and is currently **untested** by the author. If you use Tandoor, please report your results in the Issues tab!
+A fork of [D0rk4ce/mealie-recipe-dredger](https://github.com/D0rk4ce/mealie-recipe-dredger),
+which crawls food blogs' sitemaps, spots new posts, checks them against your
+existing library and imports what's missing. All of that still works exactly as
+upstream describes it. This fork adds the part that makes the result usable if
+you eat plant-based and care what's in your food:
 
-![Release](https://img.shields.io/github/v/release/D0rk4ce/mealie-recipe-dredger?include_prereleases&style=flat-square)
+- **nothing with animal ingredients gets in**, checked ingredient by ingredient
+- **every recipe carries macros** — calories, protein, fat, carbs, fibre —
+  either the site's own figures or an estimate from the ingredient list
+- **every recipe is categorised** by region and by dish type, and tagged by
+  macro band, so the library is filterable rather than just large
+- **sites that block Mealie's scraper still work**, because the recipe is built
+  locally and posted directly
 
-This script automates the process of finding **new** recipes. It scans a curated list of high-quality food blogs, detects new posts via sitemaps, checks if you already have them in your library, and imports them automatically.
+---
 
-## 🚀 Features
+## How a recipe gets in
 
-* **Multi-Platform:** Supports importing to **Mealie** (Primary) and **Tandoor** (Experimental).
-* **Secure Configuration:** Secrets managed via `.env` file (never committed to git).
-* **Editable Site List:** 100+ curated food blogs in `sites.json` - easily add/remove sites without editing code.
-* **Smart Memory:** Uses local JSON files to remember rejected and successfully imported URLs.
-* **Intelligent Caching:** Sitemap results are cached for 7 days to minimize repeat requests.
-* **Smart Deduplication:** Checks your existing libraries first. It will never import a URL you already have.
-* **Recipe Verification:** Scans pages for Schema.org JSON-LD or standard recipe CSS classes to ensure it only imports actual recipes.
-* **Deep Sitemap Scanning:** Automatically parses XML sitemaps (including recursive indexes) and robots.txt to find the most recent posts.
-* **Graceful Shutdown:** Docker-safe signal handling ensures data is saved when containers are stopped (SIGTERM/SIGINT).
-* **Rate Limiting with Jitter:** Respects robots.txt crawl-delay directives and adds human-like variance to prevent detection.
-* **Per-Site Statistics:** Tracks imported/rejected/error counts for each site processed.
-* **Progress Visualization:** Optional tqdm progress bars for long-running operations.
+Each candidate URL goes through the same pipeline:
 
-## 📊 What's New in v1.0-beta.11
+**1 · Verified as a recipe** — unchanged upstream logic: Schema.org JSON-LD or
+known recipe CSS classes, with listicles and roundups filtered out.
 
-### Massive Content Expansion
-- **149+ Verified Food Blogs:** A huge leap from previous versions, now including detailed coverage for **Balkan**, **Middle Eastern**, **African**, and **South American** cuisines.
-- **Granular Categorization:** `sites.json` is now fully organized by region and diet type.
+**2 · Vegan gate** — the ingredient list is checked against ~150 animal terms,
+including the ones people forget: honey, gelatine, whey, casein, ghee, fish
+sauce, Worcestershire, carmine, isinglass. Known false positives are stripped
+first, so vegan butter, peanut butter, butter beans, almond milk, flax eggs,
+eggplant, chickpeas, beefsteak tomatoes, king oyster mushrooms and nutritional
+yeast all pass cleanly. **A hit means the recipe is rejected, not imported.**
 
-### Reliability Enhancements
-- **Retry Queue Processing:** Automatically retries transient failures (timeouts, 500 errors) from previous runs to maximize success rates.
-- **Webhook Notifications:** Get notified via Discord/Slack/Gotify when a dredge cycle completes (set `NOTIFICATION_WEBHOOK_URL`).
-- **Startup Connectivity Check:** Fast-fail logic verifies Mealie/Tandoor API connection immediately on startup.
+**3 · Macros** — the site's published nutrition is used where it exists.
+Otherwise they're estimated from the ingredients: a ~300-entry table of per-100g
+values covering proteins, legumes, grains, flours, pasta, nuts, seeds, oils,
+plant milks, sweeteners, chocolate, vegetables, fruit and condiments, with
+cups/tablespoons/cans/blocks/cloves converted to grams and dry legumes and
+grains scaled up 2.8×. Spices, salt, water and vinegar count as
+recognised-but-zero.
 
-### Performance & Usability
-- **Library Sync:** New `SYNC_LIBRARY` option to pre-fetch existing recipes to local memory, drastically reducing API calls for large libraries.
-- **Language Filtering:** Filter recipes by language (e.g. `en`, `fr`, `de`) using `LANGUAGE_FILTER` environment variable.
-- **Refactored Core:** Lighter, faster, and easier to maintain codebase with centralized configuration.
+Two guards stop bad numbers reaching your library. If fewer than
+`MIN_COVERAGE` (70%) of the ingredient lines are recognised, nothing is
+published and the recipe is tagged `macros-unknown`. And any estimate above
+1200 kcal, 100g fat, 120g protein or 200g carbs per serving is discarded —
+almost always a recipe whose yield says "makes 1 cup" and got counted as a
+single portion. **A wrong number in the nutrition panel is worse than no
+number.**
 
-## 🐳 Quick Start (Docker)
+Ingredients with no quantity *and* no unit ("oil for deep frying") contribute
+nothing rather than an invented 100g.
 
-The most efficient way to run the Dredger is using Docker with a `.env` file for configuration.
+**4 · Region of origin** — from the recipe's own `recipeCuisine` where
+published, normalised so "Tex-Mex" lands on Mexican and "Sichuan" on Chinese;
+otherwise inferred by scoring marker ingredients and title words. Distinctive
+markers (garam masala, gochujang, berbere, harissa, doubanjiang, marmite) carry
+the decision; weak ones (cilantro, lime, maple syrup) only break ties, so a kale
+salad doesn't become Mexican because it has coriander in it. No signal means no
+category rather than a guess.
 
-### First-Time Setup
+**5 · Dish type** — Breakfast, Main, Side, Starter, Salad, Soup, Stew, Curry,
+Pasta, Noodles, Stir-fry, Sandwich, Burger, Pizza, Bowl, Bake, Bread, Baking,
+Snack, Dip, Sauce, Dressing, Dessert, Cake, Cookies, Ice Cream, Smoothie, Drink,
+Staple, Meal Prep. From the site's `recipeCategory` and `keywords` where
+present, otherwise the title and slug. A recipe can hold several — sweet things
+never also get Main, dishes that are a meal in themselves pick up Main
+automatically, and it caps at three.
 
-1. **Download the required files:**
-   ```bash
-   # Get docker-compose.yml, .env.example, and sites.json
-   wget https://raw.githubusercontent.com/D0rk4ce/mealie-recipe-dredger/main/docker-compose.yml
-   wget https://raw.githubusercontent.com/D0rk4ce/mealie-recipe-dredger/main/.env.example
-   wget https://raw.githubusercontent.com/D0rk4ce/mealie-recipe-dredger/main/sites.json
-   ```
+**6 · Written to Mealie** — one PATCH sets the nutrition panel, the categories
+and the tags, and flips on `showNutrition` so the panel actually renders.
 
-2. **Configure your secrets:**
-   ```bash
-   # Copy the template
-   cp .env.example .env
-   
-   # Edit with your settings
-   nano .env  # or vim, code, etc.
-   ```
+---
 
-3. **Update these critical values in `.env`:**
-   ```bash
-   MEALIE_URL=http://your-mealie-instance.local:9000          # Your Mealie URL
-   MEALIE_API_TOKEN=insert_your_api_token_here  # Your API token
-   DRY_RUN=false                                 # Set to false to import
-   ```
+## What you get in Mealie
 
-4. **(Optional) Customize `sites.json`:**
-   - Edit to add/remove food blogs
-   - Default includes 100+ curated sites
-   - Organized by cuisine (Asian, Latin American, etc.)
+**Categories** — region plus dish type, e.g. *Indian + Curry + Main*.
 
-5. **Run the dredger:**
-   ```bash
-   # Test run (dry mode - won't import anything)
-   docker compose up
-   
-   # Check the output, then set DRY_RUN=false in .env for live import
-   docker compose up
-   ```
+**Tags** — `vegan`, plus a band per macro. Mealie filters on tags rather than
+numbers, which is what these are for:
 
-### Your Directory Structure
+| Tag | Per serving | On by default |
+|---|---|---|
+| `protein-high` / `-med` / `-low` | ≥20g / 10–20g / <10g | yes |
+| `carb-high` / `-med` / `-low` | ≥50g / 20–50g / <20g | yes |
+| `fibre-high` / `-med` / `-low` | ≥8g / 4–8g / <4g | yes |
+| `fat-high` / `-med` / `-low` | ≥25g / 10–25g / <10g | no |
+| `calorie-high` / `-med` / `-low` | ≥700 / 400–700 / <400 kcal | no |
 
-After setup, you'll have:
-```
-recipe-dredger/
-├── .env                  # YOUR SECRETS (git ignored)
-├── .env.example          # Template (safe to share)
-├── docker-compose.yml    # Container config
-├── sites.json            # 100+ curated food blogs (customizable)
-└── data/                 # Created automatically
-    ├── imported.json
-    ├── rejects.json
-    ├── sitemap_cache.json
-    └── stats.json
-```
+Plus `macros-estimated` where the numbers were calculated rather than
+published, and `macros-unknown` where neither was possible. Every threshold is
+an `.env` setting.
 
-### Example .env File
+A saved cookbook on `vegan AND protein-high AND Indian` stays current as more
+recipes arrive.
 
-```bash
-# Mealie Configuration
-MEALIE_ENABLED=true
-MEALIE_URL=http://your-mealie-instance.local:9000
-MEALIE_API_TOKEN=insert_your_api_token_here
+---
 
-# Scraper Behavior
-DRY_RUN=true              # Set to false for live import
-LOG_LEVEL=INFO
-TARGET_RECIPES_PER_SITE=50
+## Blocked sites
 
-# Performance
-CRAWL_DELAY=2.0
-CACHE_EXPIRY_DAYS=7
-```
+Some blogs serve pages happily to this tool but refuse Mealie's scraper —
+Mealie returns HTTP 400 on every import from them. At the time of writing that
+included veganricha, cookwithmanali, thefoodietakesflight and
+shortgirltallorder, which between them are most of the Indian and Asian
+coverage.
 
-**Security Note:** Never commit `.env` to git! It contains your API tokens. The `.env.example` file is safe to commit.
+When Mealie refuses, the recipe is built here instead, from the JSON-LD already
+parsed: name, ingredients, instructions, description, yield, prep/cook/total
+times, source URL and image. Instructions are flattened across the four shapes
+sites actually publish — plain strings, newline blocks, `HowToStep` lists and
+nested `HowToSection` groups. Tags, macros and categories are applied exactly as
+for a scraped import, so the only difference is a `✅ [Local] Built from page
+data` line in the log.
 
-### Command-Line Options
+`check_blocked.py` surveys which sites are affected — it imports one real recipe
+per site and deletes it again:
 
 ```bash
-# Check version
-docker run --rm ghcr.io/d0rk4ce/mealie-recipe-dredger:latest python dredger.py --version
-
-# Dry run with custom limits
-docker run --rm ghcr.io/d0rk4ce/mealie-recipe-dredger:latest python dredger.py --dry-run --limit 10
-
-# Force fresh sitemap crawl (ignore cache)
-docker run --rm ghcr.io/d0rk4ce/mealie-recipe-dredger:latest python dredger.py --no-cache
-
-# Use custom site list
-docker run --rm -v $(pwd)/my_sites.json:/app/my_sites.json \
-  ghcr.io/d0rk4ce/mealie-recipe-dredger:latest \
-  python dredger.py --sites /app/my_sites.json
+docker compose run --rm -v /opt/recipe-dredger/check_blocked.py:/app/check_blocked.py \
+  -e LOG_LEVEL=WARNING mealie-recipe-dredger python check_blocked.py
 ```
 
-### Scheduling (Cron)
+---
 
-To run this weekly (e.g., Sundays at 3am), add an entry to your host's crontab:
+## Setup
 
 ```bash
-0 3 * * 0 cd /path/to/docker-compose-folder && docker compose up
+git clone https://github.com/RL-Fields/vegan-mealie-recipe-dredger
+cd vegan-mealie-recipe-dredger
+cp .env.example .env
+nano .env          # MEALIE_URL and MEALIE_API_TOKEN, at minimum
+docker compose build
+docker compose up  # DRY_RUN=true by default — nothing is imported
 ```
 
-## 🧹 Maintenance Mode (Cleaner)
+The API token comes from Mealie under your user → **Manage API Tokens**.
 
-The image includes a `master_cleaner.py` script to purge duplicates, listicles, and broken recipes.
+This fork builds the image locally rather than pulling upstream's, since the
+filter code lives here. When the dry run looks right:
 
-**To run the cleaner in isolation (Dry Run):**
 ```bash
-docker compose run --rm mealie-cleaner
+sed -i 's/^DRY_RUN=true/DRY_RUN=false/' .env
+docker compose run --rm mealie-recipe-dredger python dredger.py --limit 5
 ```
 
-**To actually delete data:**
-1. Edit `docker-compose.yml` and set `DRY_RUN=false` in the `mealie-cleaner` service.
-2. Run the command above again.
+Start small. `--limit 5` across 46 sites is enough to see the tags, categories
+and nutrition land before turning it loose — the default of 50 per site is
+~2,300 recipes.
 
-## ⚙️ Configuration Variables
+Weekly, once you're happy:
 
-All configuration is managed via the `.env` file (copy from `.env.example`).
+```
+0 3 * * 0 cd /opt/recipe-dredger && docker compose up >> /var/log/dredger.log 2>&1
+```
 
-### Connection Settings
+### Watching it work
 
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `MEALIE_ENABLED` | `true` | Set to `false` to disable Mealie imports. |
-| `MEALIE_URL` | N/A | Your local Mealie URL (e.g. `http://your-mealie-instance.local:9000`). |
-| `MEALIE_API_TOKEN` | N/A | Found in Mealie User Settings > Manage API Tokens. |
-| `TANDOOR_ENABLED` | `false` | Set to `true` to enable Tandoor imports. |
-| `TANDOOR_URL` | N/A | Your local Tandoor URL. |
-| `TANDOOR_API_KEY` | N/A | Your Tandoor API key. |
+The progress bar hides the per-site logging, and the crawl delay means several
+quiet minutes per site. To see the pipeline:
 
-### Scraper Behavior
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `DRY_RUN` | `true` | **Dredger:** Scan without importing. **Cleaner:** Scan without deleting. |
-| `LOG_LEVEL` | `INFO` | Set to `DEBUG` for verbose logs (shows metadata and skip reasons). |
-| `TARGET_RECIPES_PER_SITE` | `50` | Stops scanning a specific site after importing this many recipes. |
-| `SCAN_DEPTH` | `1000` | Maximum number of sitemap links to check per site before giving up. |
-
-### Performance & Rate Limiting
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `CRAWL_DELAY` | `2.0` | Seconds to wait between requests to the same domain. |
-| `RESPECT_ROBOTS_TXT` | `true` | Honor robots.txt crawl-delay directives. |
-| `CACHE_EXPIRY_DAYS` | `7` | Days before sitemap cache expires. |
-
-### Site Sources
-
-**Default:** The script uses `sites.json` which contains 100+ curated food blogs organized by cuisine.
-
-**Custom sites.json:**
-- Edit `sites.json` to add/remove blogs
-- Format: `{"sites": ["url1", "url2", ...]}`
-- Lines starting with `_` are treated as comments/section headers
-
-**Environment override (not recommended for large lists):**
 ```bash
-# In .env file
-SITES=https://example.com,https://another-blog.com
+docker compose run --rm -e LOG_LEVEL=INFO mealie-recipe-dredger \
+  python dredger.py --limit 3
 ```
 
-This overrides `sites.json` entirely.
+Each import prints its categories, tags and macros:
 
-## 📁 Configuration & Data Files
-
-### Configuration Files (Edit These)
-
-| File | Purpose |
-| :--- | :--- |
-| `.env` | **Your secrets and settings** (API tokens, URLs, behavior) |
-| `.env.example` | Template showing all available settings |
-| `sites.json` | **100+ curated food blogs** organized by cuisine |
-| `docker-compose.yml` | Container configuration |
-
-### Runtime Data Files (Auto-Generated)
-
-The script creates a `data/` directory to persist state between runs:
-
-| File | Purpose |
-| :--- | :--- |
-| `imported.json` | URLs successfully imported to your library |
-| `rejects.json` | URLs that failed recipe verification (listicles, non-recipes, etc.) |
-| `sitemap_cache.json` | Cached sitemap URLs with timestamps (expires after `CACHE_EXPIRY_DAYS`) |
-| `retry_queue.json` | Transient failures to retry on next run (500 errors, timeouts, etc.) |
-| `stats.json` | Per-site statistics and last run timestamps |
-| `verified.json` | (Cleaner only) Successfully verified recipes |
-
-**The `data/` directory is git-ignored and should never be committed.**
-
-## 🐍 Manual Usage (Python)
-
-If you prefer to run the script manually without Docker:
-
-1. **Clone the repository:**
-    ```bash
-    git clone https://github.com/d0rk4ce/mealie-recipe-dredger.git
-    cd mealie-recipe-dredger
-    ```
-
-2. **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-3. **Configure:**
-    Create a `.env` file in the project root (see `.env.example`) OR export environment variables in your terminal.
-
-4. **Run:**
-    ```bash
-    # Check version
-    python dredger.py --version
-    
-    # Dry run
-    python dredger.py --dry-run
-    
-    # Full run with custom limits
-    python dredger.py --limit 25 --depth 500
-    
-    # Force cache refresh
-    python dredger.py --no-cache
-    
-    # Run cleaner
-    python maintenance/master_cleaner.py
-    ```
-
-## 🚀 Performance Tips
-
-### Aggressive Mode (Faster, More Recipes)
-```yaml
-- CRAWL_DELAY=1.0              # Minimum polite delay
-- TARGET_RECIPES_PER_SITE=100  # Import more per site
-- SCAN_DEPTH=2000              # Check more URLs
+```
+🏷️  red-lentil-dal: Indian + Curry + Main | vegan, protein-med, carb-high,
+    fibre-high, macros-estimated — 402 kcal, P18.4 C56.0 F12.8 Fib16.6 (est 80%)
 ```
 
-### Conservative Mode (Slower, More Polite)
-```yaml
-- CRAWL_DELAY=5.0              # Very polite delay
-- TARGET_RECIPES_PER_SITE=25   # Import fewer per site
-- SCAN_DEPTH=500               # Check fewer URLs
-- CACHE_EXPIRY_DAYS=14         # Longer cache (fewer requests)
-```
+---
 
-### Bandwidth-Conscious Mode
-```yaml
-- CACHE_EXPIRY_DAYS=30         # Very long cache
-- SCAN_DEPTH=250               # Minimal scanning
-- TARGET_RECIPES_PER_SITE=10   # Quick runs
-```
+## Configuration
 
-## 🐛 Troubleshooting
+Upstream's settings all still apply — `TARGET_RECIPES_PER_SITE`, `SCAN_DEPTH`,
+`CRAWL_DELAY`, `CACHE_EXPIRY_DAYS`, `SYNC_LIBRARY`, `LANGUAGE_FILTER`,
+`NOTIFICATION_WEBHOOK_URL` and the rest. This fork adds:
 
-### Issue: "No recipes being imported"
-**Solution:** Check your `DRY_RUN` setting. It defaults to `true` for safety.
+| Setting | Default | Does |
+|---|---|---|
+| `VEGAN_ONLY` | `true` | Reject recipes containing animal ingredients |
+| `WRITE_NUTRITION` | `true` | Fill Mealie's nutrition panel |
+| `TAG_RECIPES` | `true` | Apply the tags |
+| `SET_CUISINE` | `true` | Apply region and dish-type categories |
+| `BAND_TAGS` | `protein,carb,fibre` | Which macros get band tags |
+| `MIN_COVERAGE` | `0.7` | Ingredient recognition needed to trust an estimate |
+| `CUISINE_MIN_SCORE` | `2` | Marker score needed to infer a region |
+| `PROTEIN_HIGH` / `PROTEIN_MED` | `20` / `10` | g per serving |
+| `CARB_HIGH` / `CARB_MED` | `50` / `20` | g per serving |
+| `FAT_HIGH` / `FAT_MED` | `25` / `10` | g per serving |
+| `FIBRE_HIGH` / `FIBRE_MED` | `8` / `4` | g per serving |
+| `CAL_HIGH` / `CAL_MED` | `700` / `400` | kcal per serving |
 
-### Issue: "API token errors"
-**Solution:** The script validates your configuration at startup. Look for warnings about default tokens (`your-token`).
+### Site list
 
-### Issue: "Slow performance"
-**Solution:** 
-- Increase `CRAWL_DELAY` if you see rate limiting (429 errors)
-- Decrease `SCAN_DEPTH` to process fewer URLs per site
-- Check your `data/sitemap_cache.json` is being used (look for cache hits in logs with `LOG_LEVEL=DEBUG`)
+`sites_vegan.json` replaces upstream's 149 mixed-diet blogs with ~45 fully
+vegan ones, grouped general / UK / Indian & Asian / protein-focused. It's
+mounted over `sites.json` by the compose file. A site with no reachable sitemap
+is skipped silently, so a dead entry costs nothing.
 
-### Issue: "Container stops unexpectedly"
-**Solution:** The script includes graceful shutdown handling. Check logs for `🛑 Received signal` messages. Your data is automatically saved before exit.
+---
 
-## 📊 Understanding the Output
+## What's changed from upstream
 
-### Startup Banner
-```
-🍲 Recipe Dredger Started (v1.0-beta.11)
-   Mode: DRY RUN
-   Targets: 95 sites
-   Limit: 50 per site
-```
+| File | Change |
+|---|---|
+| `vegan_filter.py` | New. Vegan gate, macro estimator, region and dish-type classification, Mealie write-back, local-import fallback. |
+| `dredger.py` | Four small hunks: import the module, capture the slug, run the gate and write-back in the main loop and the retry queue. |
+| `sites_vegan.json` | New. Vegan-only site list. |
+| `check_blocked.py` | New. Blocked-site survey. |
+| `Dockerfile` | Copies `vegan_filter.py`. |
+| `docker-compose.yml` | Builds locally; mounts `sites_vegan.json`. |
+| `.env.example` | The settings above. |
 
-### Per-Site Results
-```
-🌍 Processing Site: https://www.seriouseats.com
-   ✅ [Mealie] Imported: https://...
-   ⚠️ [Mealie] Duplicate: https://...
-   Site Results: 12 imported, 3 rejected, 0 errors
-```
+Nothing upstream was removed, so `git pull upstream main` stays mergeable.
 
-### Session Summary
-```
-==================================================
-📊 Session Summary:
-   Total Imported: 248
-   Total Rejected: 89
-   In Retry Queue: 12
-   Cached Sitemaps: 95
-==================================================
-🏁 Dredge Cycle Complete
-```
+---
 
-## 🤝 Contributors
+## Known limits
 
-* **@rpowel** and **@johnfawkes** - Stability and logging fixes in v1.0.0-beta.5.
+- **Estimated macros are for banding and rough planning, not tracking.**
+  Weights are inferred from cup and spoon measures and brands vary.
+  `macros-estimated` marks every one, and the log line shows the coverage
+  behind it.
+- **Published nutrition is taken as authoritative**, so a blog with junk figures
+  produces junk here. Nothing is cross-checked.
+- **The vegan gate needs JSON-LD ingredients.** Pages without them are imported
+  and tagged `macros-unknown` rather than dropped — reasonable on a vegan-only
+  site list. To reject them instead, edit the `if not node:` branch in
+  `analyse()`.
+- **Region and dish type are inferred from words**, so an unusual name will be
+  missed or occasionally mislabelled. Raise `CUISINE_MIN_SCORE` to be stricter.
+- **Existing recipes aren't backfilled.** Everything here applies at import.
 
-## ⚠️ Disclaimer & Ethics
+---
 
-* This tool is intended for personal archiving and self-hosting purposes.
-* **Be Polite:** The script includes delays and respects robots.txt to prevent overloading site servers. Do not circumvent these protections.
-* **Respect Creators:** Please continue to visit the original blogs to support the content creators who make these recipes possible.
-* **Rate Limiting:** The default `CRAWL_DELAY=2.0` with jitter is a reasonable balance. If a site seems slow or you encounter rate limiting (429 errors), increase this value.
+## Credit and licence
 
-## 📜 License
-
-Distributed under the MIT License. See `LICENSE` for more information.
-
-## 🔄 Upgrading from Previous Versions
-
-### Upgrading (General)
-
-**Configuration changes (recommended):**
-
-1. **Get new files:**
-   ```bash
-   wget https://raw.githubusercontent.com/D0rk4ce/mealie-recipe-dredger/main/.env.example
-   wget https://raw.githubusercontent.com/D0rk4ce/mealie-recipe-dredger/main/sites.json
-   wget https://raw.githubusercontent.com/D0rk4ce/mealie-recipe-dredger/main/docker-compose.yml
-   ```
-
-2. **Migrate to .env file:**
-   ```bash
-   # Copy template
-   cp .env.example .env
-   
-   # Transfer your settings from old docker-compose.yml to .env
-   nano .env
-   ```
-
-3. **Your data directory works as-is** - No changes needed to `data/` folder
-
-4. **Optional: Customize sites.json** - Add/remove food blogs as desired
-
-5. **Run:**
-   ```bash
-   docker compose pull
-   docker compose up
-   ```
-
-**Old configuration still works** but is not recommended (secrets in docker-compose.yml is a security risk).
-
-**New features automatically available:**
-- Graceful shutdown (works immediately in Docker)
-- Configuration validation (warnings will appear if tokens not set)
-- Session summary (shows automatically at end)
-- Sites from `sites.json` (falls back to hardcoded list if not found)
-
-### From beta.7 or earlier
-
-Same steps as above. All data files from beta.7+ are fully compatible.
+All the crawling, sitemap parsing, deduplication, caching, rate limiting and
+retry logic is [D0rk4ce](https://github.com/D0rk4ce)'s work — see
+[the upstream README](https://github.com/D0rk4ce/mealie-recipe-dredger) for how
+that machinery works and how to configure it. This fork only adds a filter and
+a classifier on top. Same licence as upstream.
