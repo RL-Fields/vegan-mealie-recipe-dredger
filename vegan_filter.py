@@ -1106,3 +1106,162 @@ def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
 # Backwards-compatible alias
 def tag_recipe(session, slug: str, verdict: 'Verdict') -> bool:
     return apply_to_mealie(session, slug, verdict)
+
+
+# ---------------------------------------------------------------------------
+# 5. LOCAL IMPORT FALLBACK
+#    Some blogs block Mealie's scraper (Cloudflare and friends) while letting
+#    the dredger's own fetch through. When Mealie refuses, build the recipe
+#    from the JSON-LD we already parsed and create it directly.
+# ---------------------------------------------------------------------------
+
+DURATION_RE = re.compile(r'P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?', re.I)
+
+
+def _duration(raw) -> Optional[str]:
+    """ISO 8601 duration (PT1H20M) -> '1 hour 20 minutes'."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    m = DURATION_RE.match(raw.strip())
+    if not m or not any(m.groups()):
+        return raw.strip() or None
+    days, hours, mins = (int(g) if g else 0 for g in m.groups())
+    hours += days * 24
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour" + ("s" if hours > 1 else ""))
+    if mins:
+        parts.append(f"{mins} minute" + ("s" if mins > 1 else ""))
+    return " ".join(parts) or None
+
+
+def _instructions(raw) -> List[str]:
+    """Flatten the several shapes recipeInstructions comes in."""
+    steps = []
+
+    def walk(node):
+        if isinstance(node, str):
+            text = re.sub(r'<[^>]+>', ' ', node)
+            for line in re.split(r'\r?\n', text):
+                line = re.sub(r'\s+', ' ', line).strip()
+                if len(line) > 3:
+                    steps.append(line)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            t = node.get('@type')
+            types = t if isinstance(t, list) else [t]
+            if 'HowToSection' in types:
+                walk(node.get('itemListElement'))
+            else:
+                walk(node.get('text') or node.get('name') or '')
+
+    walk(raw)
+    return steps
+
+
+def _image_url(node: dict) -> Optional[str]:
+    img = node.get('image')
+    if isinstance(img, list):
+        img = img[0] if img else None
+    if isinstance(img, dict):
+        img = img.get('url')
+    return img if isinstance(img, str) and img.startswith('http') else None
+
+
+def build_recipe_payload(node: dict, url: str) -> Optional[dict]:
+    name = node.get('name')
+    if isinstance(name, list):
+        name = name[0] if name else None
+    if not isinstance(name, str) or not name.strip():
+        return None
+
+    raw_ings = node.get('recipeIngredient') or node.get('ingredients') or []
+    if isinstance(raw_ings, str):
+        raw_ings = [raw_ings]
+    ingredients = [re.sub(r'\s+', ' ', i).strip()
+                   for i in raw_ings if isinstance(i, str) and i.strip()]
+    if not ingredients:
+        return None
+
+    steps = _instructions(node.get('recipeInstructions'))
+
+    yield_raw = node.get('recipeYield')
+    if isinstance(yield_raw, list):
+        yield_raw = yield_raw[0] if yield_raw else None
+
+    payload = {
+        'name': name.strip()[:255],
+        'description': (node.get('description') or '')[:1000],
+        'recipeYield': str(yield_raw) if yield_raw else '',
+        'recipeIngredient': [{'note': line, 'originalText': line}
+                             for line in ingredients],
+        'recipeInstructions': [{'text': step} for step in steps],
+        'orgURL': url,
+    }
+    for field_name, key in (('prepTime', 'prepTime'),
+                            ('performTime', 'cookTime'),
+                            ('totalTime', 'totalTime')):
+        val = _duration(node.get(key))
+        if val:
+            payload[field_name] = val
+    return payload
+
+
+def create_recipe_locally(session, url: str, soup) -> Optional[str]:
+    """Create a recipe in Mealie from HTML we already have. Returns the slug."""
+    node = extract_recipe_jsonld(soup)
+    if not node:
+        return None
+    payload = build_recipe_payload(node, url)
+    if not payload:
+        logger.debug(f"   Not enough structured data to build {url}")
+        return None
+
+    try:
+        r = session.post(f"{MEALIE_URL}/api/recipes", headers=_headers(),
+                         json={'name': payload['name']}, timeout=30)
+        if r.status_code == 409:
+            logger.debug(f"   Local import: name already exists for {url}")
+            return None
+        if r.status_code not in (200, 201):
+            logger.debug(f"   Local import create failed ({r.status_code}) for {url}")
+            return None
+        body = r.json()
+        slug = body if isinstance(body, str) else body.get('slug')
+        if not slug:
+            return None
+
+        r = session.patch(f"{MEALIE_URL}/api/recipes/{slug}",
+                          headers=_headers(), json=payload, timeout=30)
+        if r.status_code not in (200, 201):
+            logger.warning(f"   Local import detail PATCH failed "
+                           f"({r.status_code}) for {url}")
+
+        img = _image_url(node)
+        if img:
+            try:
+                session.post(f"{MEALIE_URL}/api/recipes/{slug}/image",
+                             headers=_headers(),
+                             json={'url': img, 'includeTags': False}, timeout=30)
+            except Exception:
+                pass
+
+        logger.info(f"   ✅ [Local] Built from page data: {url}")
+        return slug
+    except Exception as e:
+        logger.warning(f"   Local import error for {url}: {e}")
+        return None
+
+
+def import_with_fallback(session, importer, url: str, soup) -> Optional[str]:
+    """Try Mealie's own scraper, fall back to building it ourselves.
+
+    Returns the recipe slug, or None if both routes failed.
+    """
+    if importer.import_recipe(url):
+        return importer.last_slug
+    if soup is None:
+        return None
+    return create_recipe_locally(session, url, soup)

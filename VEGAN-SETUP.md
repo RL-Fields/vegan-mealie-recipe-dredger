@@ -61,6 +61,21 @@ Nothing upstream was removed, so `git pull` conflicts stay small.
 Filter in Mealie with the tag sidebar and the category list, or save a cookbook
 on `vegan AND protein-high AND Indian` so it stays current as more get imported.
 
+## Blocked sites
+
+Some blogs (veganricha, cookwithmanali, thefoodietakesflight, shortgirltallorder
+at the time of writing) block Mealie's scraper while letting the dredger's own
+fetch through — Mealie returns HTTP 400 on every import from them.
+
+When that happens the dredger builds the recipe itself from the JSON-LD it
+already parsed — name, ingredients, instructions, times, yield, source URL and
+image — and creates it in Mealie directly. Tags, macros and category are
+applied the same way afterwards, so a locally-built recipe is indistinguishable
+from a scraped one apart from the `✅ [Local] Built from page data` log line.
+
+This also runs slightly faster than a normal import, since Mealie isn't
+re-fetching a page the dredger already has.
+
 ## New .env settings
 
 See the block at the bottom of `.env.example`. The ones worth knowing:

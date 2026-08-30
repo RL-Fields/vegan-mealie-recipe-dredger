@@ -741,8 +741,10 @@ def process_retry_queue(storage: StorageManager, importer, verifier: 'RecipeVeri
                 completed_urls.append(url)
                 continue
 
-            if importer.import_recipe(url):
-                vegan_filter.apply_to_mealie(importer.session, importer.last_slug, verdict)
+            slug = vegan_filter.import_with_fallback(
+                importer.session, importer, url, soup)
+            if slug is not None or importer.dry_run:
+                vegan_filter.apply_to_mealie(importer.session, slug, verdict)
                 storage.add_imported(url)
                 imported_count += 1
                 completed_urls.append(url)
@@ -930,8 +932,9 @@ def main():
                     site_stats['rejected'] += 1
                     continue
 
-                if importer.import_recipe(url):
-                    vegan_filter.apply_to_mealie(session, importer.last_slug, verdict)
+                slug = vegan_filter.import_with_fallback(session, importer, url, soup)
+                if slug is not None or importer.dry_run:
+                    vegan_filter.apply_to_mealie(session, slug, verdict)
                     storage.add_imported(url)
                     imported_count += 1
                     site_stats['imported'] += 1
