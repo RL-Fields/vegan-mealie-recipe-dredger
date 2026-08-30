@@ -742,7 +742,7 @@ def process_retry_queue(storage: StorageManager, importer, verifier: 'RecipeVeri
                 continue
 
             if importer.import_recipe(url):
-                vegan_filter.tag_recipe(importer.session, importer.last_slug, verdict.tags)
+                vegan_filter.apply_to_mealie(importer.session, importer.last_slug, verdict)
                 storage.add_imported(url)
                 imported_count += 1
                 completed_urls.append(url)
@@ -931,7 +931,7 @@ def main():
                     continue
 
                 if importer.import_recipe(url):
-                    vegan_filter.tag_recipe(session, importer.last_slug, verdict.tags)
+                    vegan_filter.apply_to_mealie(session, importer.last_slug, verdict)
                     storage.add_imported(url)
                     imported_count += 1
                     site_stats['imported'] += 1

@@ -1,24 +1,34 @@
 """
-vegan_filter.py — vegan gate + protein banding for Recipe Dredger.
+vegan_filter.py — vegan gate + full macro estimation for Recipe Dredger.
 
 Drop this file next to dredger.py. It does three things:
 
 1. analyse(url, soup) -> Verdict
-   Pulls the Schema.org JSON-LD recipe block off the page, checks the
-   ingredient list for animal products, and works out protein per serving
-   (from published nutrition if present, otherwise estimated from ingredients).
+   Pulls the Schema.org JSON-LD recipe block off the page, rejects recipes
+   containing animal products, and works out per-serving macros — calories,
+   protein, fat, carbs, fibre — from published nutrition where the site has
+   it, otherwise estimated from the ingredient list.
 
-2. Verdict.tags — the Mealie tags to apply: vegan, protein-high/med/low,
-   plus protein-estimated when the number was guessed rather than published.
+2. Verdict.tags — Mealie tags: vegan, plus band tags per macro
+   (protein-high, carb-low, fibre-high …) so you can filter in the sidebar,
+   since Mealie can't filter on numeric nutrition.
 
-3. tag_recipe(slug, tags) — creates the tags in Mealie if needed and
-   attaches them to the imported recipe.
+3. apply_to_mealie(session, slug, verdict) — writes the macros into Mealie's
+   built-in nutrition fields and attaches the tags, in one PATCH.
 
 Env vars:
-  VEGAN_ONLY=true            reject non-vegan recipes instead of importing them
-  PROTEIN_HIGH=20            g per serving for protein-high
-  PROTEIN_MED=10             g per serving for protein-med
-  TAG_RECIPES=true           apply tags in Mealie after import
+  VEGAN_ONLY=true                     reject non-vegan recipes
+  TAG_RECIPES=true                    apply band tags
+  WRITE_NUTRITION=true                fill Mealie's nutrition panel
+  BAND_TAGS=protein,carb,fibre        which macros get band tags
+                                      (options: protein,carb,fat,calorie,fibre)
+  MIN_COVERAGE=0.7                    fraction of ingredient lines that must be
+                                      recognised before an estimate is trusted
+  PROTEIN_HIGH=20  PROTEIN_MED=10     g per serving
+  CARB_HIGH=50     CARB_MED=20        g per serving
+  FAT_HIGH=25      FAT_MED=10         g per serving
+  FIBRE_HIGH=8     FIBRE_MED=4        g per serving
+  CAL_HIGH=700     CAL_MED=400        kcal per serving
 """
 
 import json
@@ -26,16 +36,35 @@ import os
 import re
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("dredger.vegan")
+
+
+def _f(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
 
 MEALIE_URL = os.getenv('MEALIE_URL', 'http://localhost:9000').rstrip('/')
 MEALIE_API_TOKEN = os.getenv('MEALIE_API_TOKEN', '')
 VEGAN_ONLY = os.getenv('VEGAN_ONLY', 'true').lower() == 'true'
 TAG_RECIPES = os.getenv('TAG_RECIPES', 'true').lower() == 'true'
-PROTEIN_HIGH = float(os.getenv('PROTEIN_HIGH', 20))
-PROTEIN_MED = float(os.getenv('PROTEIN_MED', 10))
+WRITE_NUTRITION = os.getenv('WRITE_NUTRITION', 'true').lower() == 'true'
+BAND_TAGS = [b.strip().lower() for b in
+             os.getenv('BAND_TAGS', 'protein,carb,fibre').split(',') if b.strip()]
+MIN_COVERAGE = _f('MIN_COVERAGE', 0.7)
+
+# Band thresholds, per serving. (macro key, tag prefix, med, high)
+BANDS = [
+    ('protein', 'protein', _f('PROTEIN_MED', 10), _f('PROTEIN_HIGH', 20)),
+    ('carb',    'carb',    _f('CARB_MED', 20),    _f('CARB_HIGH', 50)),
+    ('fat',     'fat',     _f('FAT_MED', 10),     _f('FAT_HIGH', 25)),
+    ('fibre',   'fibre',   _f('FIBRE_MED', 4),    _f('FIBRE_HIGH', 8)),
+    ('kcal',    'calorie', _f('CAL_MED', 400),    _f('CAL_HIGH', 700)),
+]
 
 # ---------------------------------------------------------------------------
 # 1. VEGAN GATE
@@ -84,7 +113,7 @@ ANIMAL_TERMS = [
     r'\bmascarpone\b', r'\bhalloumi\b', r'\bpaneer\b', r'\bgruy[eè]re\b',
     r'\bbrie\b', r'\bgorgonzola\b', r'\bcotija\b', r'\bqueso\b',
     r'\byogh?urt\b', r'\bskyr\b', r'\bquark\b', r'\bcustard\b', r'\bcurds?\b',
-    r'\bwhey\b', r'\bcasein\b', r'\bghee\b',
+    r'\bwhey\b', r'\bcasein\b',
     r'\beggs?\b', r'\begg\s+(white|yolk)s?\b', r'\bmayonnaise\b', r'\bmayo\b',
     r'\bmeringue\b',
     # meat & poultry
@@ -120,7 +149,6 @@ def check_vegan(ingredients: List[str]) -> Tuple[bool, Optional[str]]:
     """Return (is_vegan, offending_ingredient)."""
     for raw in ingredients:
         line = re.sub(r'\s+', ' ', str(raw)).lower()
-        # Remove known false-positive phrases first
         for safe in SAFE_RE:
             line = safe.sub(' ', line)
         for rx, pattern in ANIMAL_RE:
@@ -130,73 +158,340 @@ def check_vegan(ingredients: List[str]) -> Tuple[bool, Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
-# 2. PROTEIN
+# 2. MACRO TABLE — per 100 g: (kcal, protein, fat, carbs, fibre)
+#    Legumes and grains are COOKED values; dry measures are scaled up below.
 # ---------------------------------------------------------------------------
 
-# grams of protein per 100g of ingredient
-PROTEIN_PER_100G = {
-    'seitan': 75, 'vital wheat gluten': 75, 'soy protein': 80, 'protein powder': 75,
-    'tvp': 52, 'textured vegetable protein': 52, 'soy curls': 47,
-    'peanut butter': 25, 'almond butter': 21, 'cashew butter': 18, 'tahini': 17,
-    'nutritional yeast': 50, 'hemp seed': 32, 'hemp heart': 32,
-    'pumpkin seed': 30, 'peanut': 26, 'almond': 21, 'pistachio': 20,
-    'sunflower seed': 21, 'cashew': 18, 'walnut': 15, 'chia': 17, 'flax': 18,
-    'sesame': 17, 'pecan': 9, 'hazelnut': 15, 'macadamia': 8,
-    'tempeh': 19, 'tofu': 12, 'firm tofu': 15, 'extra firm tofu': 17,
-    'silken tofu': 6, 'edamame': 11, 'soybean': 13,
-    'lentil': 9, 'red lentil': 9, 'green lentil': 9, 'brown lentil': 9,
-    'chickpea': 9, 'garbanzo': 9, 'black bean': 9, 'kidney bean': 9,
-    'pinto bean': 9, 'cannellini': 9, 'butter bean': 7, 'white bean': 9,
-    'split pea': 8, 'green pea': 5, 'pea': 5, 'bean': 8,
-    'quinoa': 4.4, 'oat': 13, 'rolled oat': 13, 'buckwheat': 13,
-    'pasta': 13, 'wholewheat pasta': 14, 'whole wheat pasta': 14,
-    'lentil pasta': 25, 'chickpea pasta': 20, 'edamame pasta': 40,
-    'bread': 9, 'flour': 10, 'wheat flour': 10, 'chickpea flour': 22,
-    'gram flour': 22, 'besan': 22, 'rice': 2.7, 'couscous': 4,
-    'bulgur': 3, 'barley': 3.5, 'millet': 3.5, 'farro': 7,
-    'soy milk': 3.3, 'soya milk': 3.3, 'pea milk': 3.3, 'oat milk': 1,
-    'almond milk': 0.5, 'coconut milk': 2, 'cashew milk': 0.5,
-    'soy yogurt': 4, 'vegan yogurt': 2, 'vegan cheese': 2, 'vegan sausage': 18,
-    'vegan mince': 17, 'veggie burger': 15, 'vegan burger': 17,
-    'nutritional': 50,
-    'mushroom': 3, 'spinach': 2.9, 'broccoli': 2.8, 'kale': 3,
-    'potato': 2, 'sweet potato': 1.6, 'cauliflower': 1.9, 'corn': 3.3,
+MACROS = {
+    # --- concentrated protein ---
+    'seitan': (370, 75, 2, 14, 1),
+    'vital wheat gluten': (370, 75, 2, 14, 0.6),
+    'protein powder': (380, 75, 5, 8, 3),
+    'soy protein': (335, 80, 1, 7, 5),
+    'tvp': (327, 52, 1.2, 34, 18),
+    'textured vegetable protein': (327, 52, 1.2, 34, 18),
+    'textured soy protein': (327, 52, 1.2, 34, 18),
+    'soy curl': (340, 47, 10, 26, 12),
+    'tofu': (144, 15, 9, 3, 2),
+    'firm tofu': (144, 15, 9, 3, 2),
+    'extra firm tofu': (165, 17, 10, 4, 2),
+    'smoked tofu': (170, 18, 10, 3, 2),
+    'silken tofu': (55, 6, 3, 2, 0.2),
+    'tempeh': (192, 19, 11, 8, 5),
+    'edamame': (121, 11, 5, 9, 5),
+    'natto': (212, 18, 11, 13, 5),
+    # --- meat alternatives ---
+    'vegan sausage': (230, 18, 14, 8, 3),
+    'vegan mince': (180, 17, 8, 7, 3),
+    'vegan burger': (220, 17, 11, 15, 4),
+    'veggie burger': (220, 15, 11, 15, 4),
+    'vegan chicken': (200, 20, 8, 12, 3),
+    'vegan bacon': (300, 12, 22, 12, 2),
+    'jackfruit': (95, 1.7, 0.6, 23, 1.5),
+    # --- legumes (cooked) ---
+    'lentil': (116, 9, 0.4, 20, 8),
+    'red lentil': (116, 9, 0.4, 20, 8),
+    'green lentil': (116, 9, 0.4, 20, 8),
+    'brown lentil': (116, 9, 0.4, 20, 8),
+    'puy lentil': (116, 9, 0.4, 20, 8),
+    'chickpea': (164, 9, 2.6, 27, 8),
+    'garbanzo': (164, 9, 2.6, 27, 8),
+    'black bean': (132, 9, 0.5, 24, 9),
+    'kidney bean': (127, 9, 0.5, 23, 7),
+    'pinto bean': (143, 9, 0.7, 26, 9),
+    'cannellini': (139, 9, 0.5, 25, 6),
+    'white bean': (139, 9, 0.5, 25, 6),
+    'borlotti': (139, 9, 0.5, 25, 6),
+    'butter bean': (115, 7, 0.4, 20, 7),
+    'lima bean': (115, 7, 0.4, 20, 7),
+    'black eyed pea': (116, 8, 0.5, 21, 6),
+    'split pea': (118, 8, 0.4, 21, 8),
+    'green pea': (81, 5, 0.4, 14, 5),
+    'baked bean': (94, 5, 0.4, 17, 4),
+    'bean': (130, 8, 0.6, 23, 7),
+    'refried bean': (110, 6, 2, 16, 5),
+    'hummus': (166, 8, 10, 14, 6),
+    # --- nuts & seeds ---
+    'almond': (579, 21, 50, 22, 12.5),
+    'cashew': (553, 18, 44, 30, 3.3),
+    'walnut': (654, 15, 65, 14, 6.7),
+    'peanut': (567, 26, 49, 16, 8.5),
+    'pecan': (691, 9, 72, 14, 9.6),
+    'pistachio': (560, 20, 45, 28, 10),
+    'hazelnut': (628, 15, 61, 17, 10),
+    'macadamia': (718, 8, 76, 14, 9),
+    'brazil nut': (659, 14, 67, 12, 7.5),
+    'pine nut': (673, 14, 68, 13, 3.7),
+    'nut': (600, 17, 55, 20, 8),
+    'chia': (486, 17, 31, 42, 34),
+    'flax': (534, 18, 42, 29, 27),
+    'linseed': (534, 18, 42, 29, 27),
+    'hemp seed': (553, 32, 49, 9, 4),
+    'hemp heart': (553, 32, 49, 9, 4),
+    'pumpkin seed': (559, 30, 49, 11, 6),
+    'sunflower seed': (584, 21, 51, 20, 9),
+    'sesame': (573, 18, 50, 23, 12),
+    'poppy seed': (525, 18, 42, 28, 20),
+    'seed': (550, 22, 45, 22, 12),
+    'peanut butter': (588, 25, 50, 20, 6),
+    'almond butter': (614, 21, 56, 19, 10),
+    'cashew butter': (587, 18, 49, 28, 2),
+    'tahini': (595, 17, 54, 21, 9),
+    'coconut butter': (650, 7, 65, 24, 16),
+    'desiccated coconut': (660, 7, 65, 24, 16),
+    'coconut flake': (660, 7, 65, 24, 16),
+    'shredded coconut': (660, 7, 65, 24, 16),
+    # --- grains, flours, pasta, bread ---
+    'rice': (130, 2.7, 0.3, 28, 0.4),
+    'brown rice': (123, 2.7, 1, 26, 1.6),
+    'quinoa': (120, 4.4, 1.9, 21, 2.8),
+    'couscous': (112, 3.8, 0.2, 23, 1.4),
+    'bulgur': (83, 3, 0.2, 19, 4.5),
+    'barley': (123, 2.3, 0.4, 28, 3.8),
+    'millet': (119, 3.5, 1, 23, 1.3),
+    'farro': (170, 6, 1, 34, 5),
+    'buckwheat': (92, 3.4, 0.6, 20, 2.7),
+    'oat': (389, 13, 7, 66, 10),
+    'rolled oat': (389, 13, 7, 66, 10),
+    'porridge oat': (389, 13, 7, 66, 10),
+    'oat flour': (389, 13, 7, 66, 10),
+    'pasta': (371, 13, 1.5, 75, 3),
+    'spaghetti': (371, 13, 1.5, 75, 3),
+    'whole wheat pasta': (348, 14, 2.5, 72, 9),
+    'wholewheat pasta': (348, 14, 2.5, 72, 9),
+    'lentil pasta': (350, 25, 2, 55, 10),
+    'chickpea pasta': (350, 20, 5, 55, 12),
+    'edamame pasta': (360, 40, 6, 32, 20),
+    'noodle': (350, 12, 2, 71, 3),
+    'rice noodle': (364, 6, 0.6, 82, 2),
+    'soba': (336, 14, 0.7, 71, 5),
+    'flour': (364, 10, 1, 76, 2.7),
+    'plain flour': (364, 10, 1, 76, 2.7),
+    'wholemeal flour': (340, 13, 2.5, 72, 11),
+    'whole wheat flour': (340, 13, 2.5, 72, 11),
+    'chickpea flour': (387, 22, 7, 58, 11),
+    'gram flour': (387, 22, 7, 58, 11),
+    'besan': (387, 22, 7, 58, 11),
+    'almond flour': (571, 21, 50, 21, 11),
+    'coconut flour': (400, 18, 13, 60, 39),
+    'cornflour': (381, 0.3, 0.1, 91, 1),
+    'cornstarch': (381, 0.3, 0.1, 91, 1),
+    'polenta': (370, 7, 1.7, 79, 7),
+    'cornmeal': (370, 7, 1.7, 79, 7),
+    'bread': (265, 9, 3, 49, 3),
+    'breadcrumb': (395, 13, 5, 72, 4),
+    'tortilla': (310, 8, 7, 52, 3),
+    'pita': (275, 9, 1.2, 56, 2),
+    'bun': (280, 9, 4, 51, 2),
+    'puff pastry': (551, 7, 38, 45, 2),
+    'pastry': (450, 6, 25, 50, 2),
+    # --- plant milks & dairy alternatives ---
+    'soy milk': (43, 3.3, 1.8, 3, 0.5),
+    'soya milk': (43, 3.3, 1.8, 3, 0.5),
+    'pea milk': (43, 3.3, 2, 2, 0.5),
+    'oat milk': (45, 1, 1.5, 7, 0.8),
+    'almond milk': (15, 0.5, 1.1, 0.6, 0.3),
+    'cashew milk': (25, 0.5, 2, 1.5, 0.2),
+    'rice milk': (47, 0.3, 1, 9, 0),
+    'hemp milk': (46, 2, 3, 3, 0.5),
+    'coconut milk': (197, 2, 21, 3, 2),
+    'coconut cream': (330, 3, 35, 6, 2),
+    'vegan cream': (200, 1, 20, 4, 0),
+    'vegan yogurt': (60, 2, 3, 7, 0.5),
+    'soy yogurt': (55, 4, 2, 4, 0.5),
+    'coconut yogurt': (130, 1, 11, 7, 1),
+    'vegan cheese': (285, 2, 23, 18, 1),
+    'vegan cream cheese': (250, 2, 24, 6, 1),
+    'vegan butter': (717, 0.5, 80, 0.5, 0),
+    'margarine': (717, 0.5, 80, 0.5, 0),
+    'vegan mayo': (680, 0.5, 75, 2, 0),
+    'nutritional yeast': (385, 50, 5, 36, 20),
+    # --- fats & oils ---
+    'olive oil': (884, 0, 100, 0, 0),
+    'coconut oil': (862, 0, 100, 0, 0),
+    'vegetable oil': (884, 0, 100, 0, 0),
+    'sunflower oil': (884, 0, 100, 0, 0),
+    'rapeseed oil': (884, 0, 100, 0, 0),
+    'canola oil': (884, 0, 100, 0, 0),
+    'sesame oil': (884, 0, 100, 0, 0),
+    'avocado oil': (884, 0, 100, 0, 0),
+    'oil': (884, 0, 100, 0, 0),
+    'cooking spray': (884, 0, 100, 0, 0),
+    # --- sweeteners ---
+    'sugar': (387, 0, 0, 100, 0),
+    'caster sugar': (387, 0, 0, 100, 0),
+    'brown sugar': (380, 0, 0, 98, 0),
+    'icing sugar': (389, 0, 0, 100, 0),
+    'powdered sugar': (389, 0, 0, 100, 0),
+    'coconut sugar': (375, 0, 0, 100, 0),
+    'maple syrup': (260, 0, 0, 67, 0),
+    'agave': (310, 0, 0, 76, 0),
+    'golden syrup': (300, 0, 0, 79, 0),
+    'molasses': (290, 0, 0, 75, 0),
+    'date syrup': (290, 1, 0, 72, 1),
+    'date': (282, 2.5, 0.4, 75, 8),
+    'jam': (278, 0.4, 0, 69, 1),
+    # --- chocolate, cocoa, baking ---
+    'cocoa': (228, 20, 14, 58, 33),
+    'cacao': (228, 20, 14, 58, 33),
+    'dark chocolate': (546, 5, 31, 61, 7),
+    'chocolate chip': (480, 4, 25, 62, 5),
+    'chocolate': (500, 5, 28, 60, 6),
+    'yeast': (325, 40, 8, 41, 27),
+    # --- vegetables ---
+    'onion': (40, 1.1, 0.1, 9, 1.7),
+    'shallot': (72, 2.5, 0.1, 17, 3),
+    'spring onion': (32, 1.8, 0.2, 7, 2.6),
+    'garlic': (149, 6, 0.5, 33, 2),
+    'ginger': (80, 1.8, 0.8, 18, 2),
+    'carrot': (41, 0.9, 0.2, 10, 2.8),
+    'celery': (16, 0.7, 0.2, 3, 1.6),
+    'tomato': (18, 0.9, 0.2, 3.9, 1.2),
+    'tinned tomato': (32, 1.6, 0.3, 7, 1.9),
+    'canned tomato': (32, 1.6, 0.3, 7, 1.9),
+    'tomato paste': (82, 4, 0.5, 19, 4),
+    'tomato puree': (82, 4, 0.5, 19, 4),
+    'passata': (35, 1.6, 0.3, 7, 1.5),
+    'potato': (77, 2, 0.1, 17, 2.2),
+    'sweet potato': (86, 1.6, 0.1, 20, 3),
+    'pepper': (31, 1, 0.3, 6, 2.1),
+    'bell pepper': (31, 1, 0.3, 6, 2.1),
+    'chilli': (40, 1.9, 0.4, 9, 1.5),
+    'courgette': (17, 1.2, 0.3, 3.1, 1),
+    'zucchini': (17, 1.2, 0.3, 3.1, 1),
+    'aubergine': (25, 1, 0.2, 6, 3),
+    'mushroom': (22, 3.1, 0.3, 3.3, 1),
+    'spinach': (23, 2.9, 0.4, 3.6, 2.2),
+    'kale': (49, 4.3, 0.9, 9, 4),
+    'chard': (19, 1.8, 0.2, 3.7, 1.6),
+    'broccoli': (34, 2.8, 0.4, 7, 2.6),
+    'cauliflower': (25, 1.9, 0.3, 5, 2),
+    'cabbage': (25, 1.3, 0.1, 6, 2.5),
+    'brussels sprout': (43, 3.4, 0.3, 9, 3.8),
+    'lettuce': (15, 1.4, 0.2, 2.9, 1.3),
+    'rocket': (25, 2.6, 0.7, 3.7, 1.6),
+    'arugula': (25, 2.6, 0.7, 3.7, 1.6),
+    'cucumber': (15, 0.7, 0.1, 3.6, 0.5),
+    'leek': (61, 1.5, 0.3, 14, 1.8),
+    'asparagus': (20, 2.2, 0.1, 3.9, 2.1),
+    'green bean': (31, 1.8, 0.2, 7, 2.7),
+    'corn': (86, 3.3, 1.2, 19, 2),
+    'sweetcorn': (86, 3.3, 1.2, 19, 2),
+    'butternut': (45, 1, 0.1, 12, 2),
+    'squash': (45, 1, 0.1, 12, 2),
+    'pumpkin': (26, 1, 0.1, 7, 0.5),
+    'beetroot': (43, 1.6, 0.2, 10, 2.8),
+    'parsnip': (75, 1.2, 0.3, 18, 4.9),
+    'turnip': (28, 0.9, 0.1, 6, 1.8),
+    'swede': (37, 1.1, 0.2, 9, 2.3),
+    'olive': (145, 1, 15, 4, 3.2),
+    'artichoke': (47, 3.3, 0.2, 11, 5.4),
+    'sauerkraut': (19, 0.9, 0.1, 4, 2.9),
+    'kimchi': (23, 1.7, 0.5, 4, 1.6),
+    'seaweed': (45, 6, 0.6, 9, 1),
+    'nori': (35, 6, 0.3, 5, 0.3),
+    # --- fruit ---
+    'banana': (89, 1.1, 0.3, 23, 2.6),
+    'apple': (52, 0.3, 0.2, 14, 2.4),
+    'orange': (47, 0.9, 0.1, 12, 2.4),
+    'lemon': (29, 1.1, 0.3, 9, 2.8),
+    'lime': (30, 0.7, 0.2, 11, 2.8),
+    'berry': (57, 0.7, 0.3, 14, 2.4),
+    'strawberry': (32, 0.7, 0.3, 8, 2),
+    'blueberry': (57, 0.7, 0.3, 14, 2.4),
+    'raspberry': (52, 1.2, 0.7, 12, 6.5),
+    'mango': (60, 0.8, 0.4, 15, 1.6),
+    'pineapple': (50, 0.5, 0.1, 13, 1.4),
+    'peach': (39, 0.9, 0.3, 10, 1.5),
+    'pear': (57, 0.4, 0.1, 15, 3.1),
+    'avocado': (160, 2, 15, 9, 7),
+    'raisin': (299, 3, 0.5, 79, 3.7),
+    'sultana': (299, 3, 0.5, 79, 3.7),
+    'cranberry': (308, 0.1, 1.4, 82, 5.7),
+    'apricot': (241, 3.4, 0.5, 63, 7),
+    'apple sauce': (68, 0.2, 0.2, 18, 1.2),
+    'coconut water': (19, 0.7, 0.2, 3.7, 1.1),
+    # --- condiments, stocks, misc ---
+    'soy sauce': (53, 8, 0, 5, 0.8),
+    'tamari': (60, 10, 0.1, 5, 0.8),
+    'coconut aminos': (110, 1, 0, 25, 0),
+    'miso': (199, 12, 6, 26, 5),
+    'vegetable stock': (5, 0.3, 0.1, 0.8, 0),
+    'vegetable broth': (5, 0.3, 0.1, 0.8, 0),
+    'stock': (5, 0.3, 0.1, 0.8, 0),
+    'broth': (5, 0.3, 0.1, 0.8, 0),
+    'ketchup': (101, 1.2, 0.1, 26, 0.3),
+    'mustard': (66, 4, 4, 5, 3),
+    'sriracha': (93, 2, 1, 19, 2),
+    'harissa': (110, 3, 6, 10, 4),
+    'curry paste': (150, 3, 9, 14, 4),
+    'pesto': (450, 5, 45, 6, 2),
+    'salsa': (36, 1.5, 0.2, 7, 1.8),
+    'peanut sauce': (300, 10, 22, 15, 3),
+    'wine': (83, 0.1, 0, 2.6, 0),
+    'beer': (43, 0.5, 0, 3.6, 0),
+    'tofu press': (144, 15, 9, 3, 2),
+    'crisps': (536, 7, 34, 53, 4),
+    'popcorn': (387, 13, 4.5, 78, 15),
+    'granola': (471, 10, 20, 64, 7),
 }
 
-# Dry weights of grains/legumes hold roughly 2.5-3x the protein of the cooked
-# weight in the table above. If the line reads as dry (no "cooked"/"canned"),
-# scale it up.
+# Ingredients whose contribution rounds to nothing — count as recognised
+# so they don't drag the coverage score down.
+NEGLIGIBLE = [
+    'salt', 'pepper', 'water', 'ice', 'vinegar', 'lemon juice', 'lime juice',
+    'baking powder', 'baking soda', 'bicarbonate', 'cream of tartar',
+    'extract', 'essence', 'vanilla', 'food colouring', 'food coloring',
+    'cumin', 'coriander', 'paprika', 'turmeric', 'cinnamon', 'nutmeg',
+    'cardamom', 'clove', 'oregano', 'thyme', 'rosemary', 'basil', 'parsley',
+    'cilantro', 'dill', 'sage', 'bay leaf', 'chilli flake', 'chili flake',
+    'red pepper flake', 'garam masala', 'curry powder', 'spice', 'seasoning',
+    'herb', 'mint', 'chive', 'zest', 'garnish', 'to taste', 'to serve',
+    'xanthan', 'agar', 'liquid smoke', 'msg', 'stevia', 'sweetener',
+    'asafoetida', 'fenugreek', 'star anise', 'peppercorn', 'mustard seed',
+    'nutritional info', 'optional',
+]
+
+# Dry legumes/grains hold roughly 2.8x the macros of the cooked weight above.
 DRY_KEYS = ('lentil', 'bean', 'chickpea', 'garbanzo', 'split pea', 'quinoa',
-            'rice', 'barley', 'bulgur', 'millet', 'farro', 'couscous')
+            'rice', 'barley', 'bulgur', 'millet', 'farro', 'couscous',
+            'buckwheat')
 DRY_FACTOR = 2.8
 COOKED_HINTS = ('cooked', 'canned', 'can ', 'tin', 'drained', 'rinsed',
-                'leftover', 'pre-cooked', 'precooked')
-# Processed forms that are already protein-dense as sold — never scale these
+                'leftover', 'pre-cooked', 'precooked', 'jar')
 DRY_EXCLUDE = ('pasta', 'noodle', 'flour', 'milk', 'yogurt', 'yoghurt',
-               'bread', 'cake', 'chip', 'crisp', 'puff', 'snack', 'syrup')
+               'bread', 'cake', 'chip', 'crisp', 'puff', 'snack', 'syrup',
+               'sprout')
 
 # rough grams per cup, by ingredient family
 CUP_GRAMS = {
     'spinach': 30, 'kale': 30, 'lettuce': 30, 'rocket': 25, 'arugula': 25,
     'herb': 25, 'basil': 25, 'coriander': 25, 'cilantro': 25, 'parsley': 25,
     'mushroom': 70, 'broccoli': 90, 'cauliflower': 100, 'pepper': 150,
+    'berry': 145, 'coconut': 80, 'breadcrumb': 110, 'cocoa': 85,
+    'sugar': 200, 'oil': 218, 'syrup': 320, 'date': 150,
     'flour': 125, 'oat': 90, 'rice': 185, 'quinoa': 170, 'lentil': 190,
     'bean': 175, 'chickpea': 165, 'pasta': 100, 'seed': 140, 'nut': 130,
     'butter': 250, 'milk': 240, 'yogurt': 245, 'tofu': 250, 'tempeh': 165,
-    'gluten': 136, 'yeast': 60, 'default': 150,
+    'gluten': 136, 'yeast': 60, 'stock': 240, 'broth': 240, 'sauce': 240,
+    'default': 150,
 }
 
 UNIT_GRAMS = {
-    'g': 1, 'gram': 1, 'grams': 1, 'gr': 1,
-    'kg': 1000, 'kilogram': 1000,
+    'g': 1, 'gram': 1, 'grams': 1, 'gr': 1, 'gs': 1,
+    'kg': 1000, 'kilogram': 1000, 'kilograms': 1000,
     'oz': 28.35, 'ounce': 28.35, 'ounces': 28.35,
-    'lb': 453.6, 'pound': 453.6, 'pounds': 453.6,
+    'lb': 453.6, 'lbs': 453.6, 'pound': 453.6, 'pounds': 453.6,
     'ml': 1, 'millilitre': 1, 'milliliter': 1, 'l': 1000, 'litre': 1000,
-    'tbsp': 15, 'tablespoon': 15, 'tablespoons': 15, 'tbs': 15,
+    'liter': 1000, 'litres': 1000, 'liters': 1000,
+    'tbsp': 15, 'tablespoon': 15, 'tablespoons': 15, 'tbs': 15, 'tb': 15,
     'tsp': 5, 'teaspoon': 5, 'teaspoons': 5,
-    'cup': None, 'cups': None,  # resolved per-ingredient
-    'can': 400, 'cans': 400, 'tin': 400, 'tins': 400,
+    'cup': None, 'cups': None, 'c': None,
+    'can': 400, 'cans': 400, 'tin': 400, 'tins': 400, 'jar': 350,
     'block': 350, 'blocks': 350, 'package': 350, 'packet': 350, 'pkg': 350,
+    'bunch': 100, 'handful': 30, 'slice': 30, 'slices': 30,
+    'clove': 5, 'cloves': 5, 'sprig': 2, 'stalk': 40, 'stick': 60,
+    'pinch': 0.5, 'dash': 1,
 }
 
 FRACTIONS = {'½': 0.5, '⅓': 1/3, '⅔': 2/3, '¼': 0.25, '¾': 0.75,
@@ -207,6 +502,8 @@ QTY_RE = re.compile(
     r'(?P<unit>[a-zA-Z]+\.?)?\s*(?P<rest>.*)$'
 )
 
+MACRO_KEYS = ('kcal', 'protein', 'fat', 'carb', 'fibre')
+
 
 def _parse_qty(text: str) -> float:
     text = text.strip()
@@ -214,9 +511,12 @@ def _parse_qty(text: str) -> float:
         return 1.0
     if text in FRACTIONS:
         return FRACTIONS[text]
-    if ' ' in text and '/' in text:  # "1 1/2"
+    if ' ' in text and '/' in text:
         whole, frac = text.split(' ', 1)
-        return float(whole) + _parse_qty(frac)
+        try:
+            return float(whole) + _parse_qty(frac)
+        except ValueError:
+            return _parse_qty(frac)
     if '/' in text:
         a, b = text.split('/', 1)
         try:
@@ -236,22 +536,33 @@ def _cup_grams(name: str) -> float:
     return CUP_GRAMS['default']
 
 
-def _protein_per_100g(name: str) -> Optional[float]:
-    # longest match wins, so "extra firm tofu" beats "tofu"
+def _lookup(name: str) -> Optional[Tuple]:
+    """Longest key match wins, so 'extra firm tofu' beats 'tofu'."""
     best, best_len = None, 0
-    for key, val in PROTEIN_PER_100G.items():
+    for key, vals in MACROS.items():
         if key in name and len(key) > best_len:
-            best, best_len = val, len(key)
+            best, best_len = vals, len(key)
     return best
 
 
-def estimate_protein(ingredients: List[str], servings: float) -> Optional[float]:
-    """Rough total protein per serving, in grams. None if nothing recognised."""
-    total = 0.0
-    matched = 0
+def estimate_macros(ingredients: List[str], servings: float
+                    ) -> Tuple[Optional[Dict[str, float]], float]:
+    """Per-serving macros and the fraction of ingredient lines recognised."""
+    totals = dict.fromkeys(MACRO_KEYS, 0.0)
+    considered = 0
+    recognised = 0
+
     for raw in ingredients:
         line = re.sub(r'\(.*?\)', ' ', str(raw)).lower().strip()
         line = line.replace('-', ' ')
+        if not line:
+            continue
+        considered += 1
+
+        if any(n in line for n in NEGLIGIBLE) and _lookup(line) is None:
+            recognised += 1
+            continue
+
         m = QTY_RE.match(line)
         if not m:
             continue
@@ -259,37 +570,42 @@ def estimate_protein(ingredients: List[str], servings: float) -> Optional[float]
         unit = (m.group('unit') or '').lower().rstrip('.')
         rest = m.group('rest') or ''
 
-        p100 = _protein_per_100g(rest) or _protein_per_100g(line)
-        if p100 is None:
+        vals = _lookup(rest) or _lookup(line)
+        if vals is None:
             continue
+        recognised += 1
 
         if unit in UNIT_GRAMS:
             grams = UNIT_GRAMS[unit]
-            if grams is None:  # cups
+            if grams is None:
                 grams = _cup_grams(rest)
             grams = qty * grams
-        elif unit in ('', 'large', 'small', 'medium'):
-            grams = qty * 100  # bare count: assume ~100g each
+        elif unit in ('', 'large', 'small', 'medium', 'whole', 'ripe'):
+            grams = qty * 100
         else:
-            rest = f"{unit} {rest}"
-            p100 = _protein_per_100g(rest) or p100
             grams = qty * 100
 
-        # Dry legumes/grains carry far more protein per gram than cooked ones
         if (any(k in line for k in DRY_KEYS)
                 and not any(h in line for h in COOKED_HINTS)
                 and not any(x in line for x in DRY_EXCLUDE)
-                and unit in ('cup', 'cups', 'g', 'gram', 'grams', 'oz', 'ounce',
-                             'ounces', 'lb', 'pound', 'pounds', 'kg')):
-            p100 = p100 * DRY_FACTOR
+                and unit in ('cup', 'cups', 'c', 'g', 'gram', 'grams', 'oz',
+                             'ounce', 'ounces', 'lb', 'lbs', 'pound', 'pounds',
+                             'kg')):
+            scale = DRY_FACTOR
+        else:
+            scale = 1.0
 
-        grams = min(grams, 2000)  # sanity clamp
-        total += grams * p100 / 100.0
-        matched += 1
+        grams = min(grams, 3000)
+        for key, val in zip(MACRO_KEYS, vals):
+            totals[key] += grams * val * scale / 100.0
 
-    if matched == 0 or servings <= 0:
-        return None
-    return round(total / servings, 1)
+    if recognised == 0 or servings <= 0:
+        return None, 0.0
+
+    coverage = recognised / considered if considered else 0.0
+    per_serving = {k: round(v / servings, 1) for k, v in totals.items()}
+    per_serving['kcal'] = round(per_serving['kcal'])
+    return per_serving, round(coverage, 2)
 
 
 def _num(text) -> Optional[float]:
@@ -333,20 +649,62 @@ def _servings(node: dict) -> float:
     return n if n and n > 0 else 4.0
 
 
+def published_macros(node: dict) -> Optional[Dict[str, float]]:
+    """Macros from the site's own nutrition block, if it has a useful one."""
+    n = node.get('nutrition')
+    if not isinstance(n, dict):
+        return None
+    out = {
+        'kcal': _num(n.get('calories')),
+        'protein': _num(n.get('proteinContent')),
+        'fat': _num(n.get('fatContent')),
+        'carb': _num(n.get('carbohydrateContent')),
+        'fibre': _num(n.get('fiberContent')),
+    }
+    # Need at least calories and protein to call it published
+    if out['kcal'] is None or out['protein'] is None:
+        return None
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def band_tags(macros: Dict[str, float]) -> List[str]:
+    tags = []
+    for key, prefix, med, high in BANDS:
+        if prefix not in BAND_TAGS or key not in macros:
+            continue
+        val = macros[key]
+        if val >= high:
+            tags.append(f"{prefix}-high")
+        elif val >= med:
+            tags.append(f"{prefix}-med")
+        else:
+            tags.append(f"{prefix}-low")
+    return tags
+
+
 @dataclass
 class Verdict:
     vegan: bool = True
     reason: Optional[str] = None
-    protein: Optional[float] = None
+    macros: Optional[Dict[str, float]] = None
     estimated: bool = False
+    coverage: float = 0.0
     tags: List[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        if not self.macros:
+            return "no macros"
+        m = self.macros
+        src = f"est {int(self.coverage * 100)}%" if self.estimated else "published"
+        return (f"{m.get('kcal', '?')} kcal, P{m.get('protein', '?')} "
+                f"C{m.get('carb', '?')} F{m.get('fat', '?')} "
+                f"Fib{m.get('fibre', '?')} ({src})")
 
 
 def analyse(url: str, soup) -> Verdict:
     node = extract_recipe_jsonld(soup)
     if not node:
-        # No structured data: can't verify. Let it through untagged, but flagged.
-        return Verdict(vegan=True, tags=['protein-unknown'])
+        return Verdict(vegan=True, tags=['vegan', 'macros-unknown'])
 
     raw_ings = node.get('recipeIngredient') or node.get('ingredients') or []
     if isinstance(raw_ings, str):
@@ -358,34 +716,31 @@ def analyse(url: str, soup) -> Verdict:
         return Verdict(vegan=False, reason=f"Non-vegan ingredient: {offender}")
 
     servings = _servings(node)
-    protein, estimated = None, False
+    macros = published_macros(node)
+    estimated = False
+    coverage = 1.0
 
-    nutrition = node.get('nutrition') or {}
-    if isinstance(nutrition, dict):
-        protein = _num(nutrition.get('proteinContent'))
-
-    if protein is None:
-        protein = estimate_protein(ingredients, servings)
-        estimated = protein is not None
+    if macros is None:
+        macros, coverage = estimate_macros(ingredients, servings)
+        estimated = macros is not None
+        if macros is not None and coverage < MIN_COVERAGE:
+            logger.debug(f"   Low ingredient coverage ({coverage}) for {url}")
+            macros = None
 
     tags = ['vegan']
-    if protein is None:
-        tags.append('protein-unknown')
+    if macros is None:
+        tags.append('macros-unknown')
     else:
-        if protein >= PROTEIN_HIGH:
-            tags.append('protein-high')
-        elif protein >= PROTEIN_MED:
-            tags.append('protein-med')
-        else:
-            tags.append('protein-low')
+        tags += band_tags(macros)
         if estimated:
-            tags.append('protein-estimated')
+            tags.append('macros-estimated')
 
-    return Verdict(vegan=True, protein=protein, estimated=estimated, tags=tags)
+    return Verdict(vegan=True, macros=macros, estimated=estimated,
+                   coverage=coverage, tags=tags)
 
 
 # ---------------------------------------------------------------------------
-# 4. MEALIE TAGGING
+# 4. MEALIE WRITE-BACK
 # ---------------------------------------------------------------------------
 
 _tag_cache = {}
@@ -419,7 +774,7 @@ def _ensure_tag(session, name: str) -> Optional[dict]:
             tag = r.json()
             _tag_cache[name.lower()] = tag
             return tag
-        if r.status_code == 409:  # already exists, refresh cache
+        if r.status_code == 409:
             _tag_cache.clear()
             _load_tags(session)
             return _tag_cache.get(name.lower())
@@ -428,20 +783,49 @@ def _ensure_tag(session, name: str) -> Optional[dict]:
     return None
 
 
-def tag_recipe(session, slug: str, tags: List[str]) -> bool:
-    """Attach tags to an imported Mealie recipe. Returns True on success."""
-    if not (TAG_RECIPES and slug and tags):
+def _nutrition_payload(macros: Dict[str, float]) -> Dict[str, str]:
+    """Mealie stores nutrition values as strings."""
+    mapping = {
+        'kcal': 'calories',
+        'protein': 'proteinContent',
+        'fat': 'fatContent',
+        'carb': 'carbohydrateContent',
+        'fibre': 'fiberContent',
+    }
+    return {field: str(macros[key])
+            for key, field in mapping.items() if key in macros}
+
+
+def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
+    """Attach tags and nutrition to an imported Mealie recipe."""
+    if not slug:
         return False
-    tag_objs = [t for t in (_ensure_tag(session, n) for n in tags) if t]
-    if not tag_objs:
+
+    payload = {}
+
+    if TAG_RECIPES and verdict.tags:
+        tag_objs = [t for t in (_ensure_tag(session, n) for n in verdict.tags) if t]
+        if tag_objs:
+            payload['tags'] = tag_objs
+
+    if WRITE_NUTRITION and verdict.macros:
+        payload['nutrition'] = _nutrition_payload(verdict.macros)
+
+    if not payload:
         return False
+
     try:
         r = session.patch(f"{MEALIE_URL}/api/recipes/{slug}",
-                          headers=_headers(), json={"tags": tag_objs}, timeout=20)
+                          headers=_headers(), json=payload, timeout=20)
         if r.status_code in (200, 201):
-            logger.info(f"   🏷️  Tagged {slug}: {', '.join(tags)}")
+            logger.info(f"   🏷️  {slug}: {', '.join(verdict.tags)} — {verdict.summary()}")
             return True
-        logger.warning(f"   Tagging failed for {slug}: HTTP {r.status_code}")
+        logger.warning(f"   Write-back failed for {slug}: HTTP {r.status_code}")
     except Exception as e:
-        logger.warning(f"   Tagging error for {slug}: {e}")
+        logger.warning(f"   Write-back error for {slug}: {e}")
     return False
+
+
+# Backwards-compatible alias
+def tag_recipe(session, slug: str, verdict: 'Verdict') -> bool:
+    return apply_to_mealie(session, slug, verdict)
