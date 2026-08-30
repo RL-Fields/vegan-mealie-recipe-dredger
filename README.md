@@ -181,6 +181,29 @@ Each import prints its categories, tags and macros:
 
 ---
 
+## Backfilling recipes you already have
+
+Everything above happens at import, so recipes imported before a given feature
+never got it. This brings them up to date — macros, per-100g figures, band
+tags, region and dish-type categories:
+
+```bash
+docker compose run --rm mealie-recipe-dredger \
+  python maintenance/backfill_existing.py --dry-run
+```
+
+It works from what Mealie already stores — name, ingredients, yield, any
+nutrition — so it never re-crawls the source sites and isn't affected by crawl
+delays or blocked scrapers. A few hundred recipes takes a minute or two.
+
+Drop `--dry-run` to apply, or add `--limit 20` to try a handful first. Worth
+re-running after any change to thresholds, markers or tags.
+
+Tags and categories you added yourself are preserved: only the tags this tool
+manages (`vegan`, the macro bands, `macros-*`) are replaced, so re-running
+never leaves a recipe holding both `protein-med` and `protein-high`. Categories
+are additive only.
+
 ## Configuration
 
 Upstream's settings all still apply — `TARGET_RECIPES_PER_SITE`, `SCAN_DEPTH`,
@@ -218,7 +241,7 @@ is skipped silently, so a dead entry costs nothing.
 | `vegan_filter.py` | New. Vegan gate, macro estimator, region and dish-type classification, Mealie write-back, local-import fallback. |
 | `dredger.py` | Four small hunks: import the module, capture the slug, run the gate and write-back in the main loop and the retry queue. |
 | `sites_vegan.json` | New. Vegan-only site list. |
-| `check_blocked.py` | New. Blocked-site survey. |
+| `maintenance/backfill_existing.py` | New. Re-applies macros, tags and categories to recipes already in Mealie. |
 | `Dockerfile` | Copies `vegan_filter.py`. |
 | `docker-compose.yml` | Builds locally; mounts `sites_vegan.json`. |
 | `.env.example` | The settings above. |
