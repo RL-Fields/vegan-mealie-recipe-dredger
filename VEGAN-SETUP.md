@@ -58,6 +58,15 @@ Nothing upstream was removed, so `git pull` conflicts stay small.
    guess; raise `CUISINE_MIN_SCORE` to make it stricter. A handful of
    single-cuisine blogs act as a last-resort fallback.
 
+8. **Dish type** — also Mealie categories, and a recipe can hold several:
+   Breakfast, Main, Side, Starter, Salad, Soup, Stew, Curry, Pasta, Noodles,
+   Stir-fry, Sandwich, Burger, Pizza, Bowl, Bake, Bread, Baking, Snack, Dip,
+   Sauce, Dressing, Dessert, Cake, Cookies, Ice Cream, Smoothie, Drink,
+   Staple, Meal Prep. Read from the site's own `recipeCategory` and `keywords`
+   where present, otherwise from the title and URL slug. Dishes that are a
+   meal in themselves also pick up Main; sweet things never do. Capped at
+   three per recipe so the category list stays usable.
+
 Filter in Mealie with the tag sidebar and the category list, or save a cookbook
 on `vegan AND protein-high AND Indian` so it stays current as more get imported.
 

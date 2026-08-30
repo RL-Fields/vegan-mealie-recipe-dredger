@@ -787,6 +787,153 @@ SITE_CUISINE = {
 }
 
 
+
+# ---------------------------------------------------------------------------
+# 2c. DISH TYPE
+#     Meal and course categories, alongside the region. A recipe can carry
+#     several — "Vegan Lentil Soup" is both Soup and Main.
+# ---------------------------------------------------------------------------
+
+# What sites publish in recipeCategory / keywords, mapped onto our names.
+DISH_ALIASES = {
+    'breakfast': 'Breakfast', 'brunch': 'Breakfast', 'morning': 'Breakfast',
+    'main': 'Main', 'main course': 'Main', 'main dish': 'Main',
+    'entree': 'Main', 'entrée': 'Main', 'dinner': 'Main', 'lunch': 'Main',
+    'supper': 'Main', 'side': 'Side', 'side dish': 'Side',
+    'appetizer': 'Starter', 'appetiser': 'Starter', 'starter': 'Starter',
+    'salad': 'Salad', 'soup': 'Soup', 'stew': 'Stew', 'curry': 'Curry',
+    'pasta': 'Pasta', 'noodles': 'Noodles', 'sandwich': 'Sandwich',
+    'burger': 'Burger', 'pizza': 'Pizza', 'bowl': 'Bowl',
+    'snack': 'Snack', 'snacks': 'Snack', 'dip': 'Dip', 'sauce': 'Sauce',
+    'condiment': 'Sauce', 'condiments': 'Sauce', 'dressing': 'Dressing',
+    'spread': 'Dip', 'bread': 'Bread', 'baking': 'Baking',
+    'dessert': 'Dessert', 'desserts': 'Dessert', 'sweets': 'Dessert',
+    'cake': 'Cake', 'cakes': 'Cake', 'cookies': 'Cookies',
+    'cookie': 'Cookies', 'biscuits': 'Cookies', 'ice cream': 'Ice Cream',
+    'frozen dessert': 'Ice Cream', 'drink': 'Drink', 'drinks': 'Drink',
+    'beverage': 'Drink', 'beverages': 'Drink', 'smoothie': 'Smoothie',
+    'smoothies': 'Smoothie', 'cocktail': 'Drink',
+    'casserole': 'Bake', 'bake': 'Baking', 'baked goods': 'Baking',
+    'stir fry': 'Stir-fry', 'stir-fry': 'Stir-fry', 'wrap': 'Sandwich',
+    'meal prep': 'Meal Prep', 'batch cooking': 'Meal Prep',
+}
+
+# Title and URL markers, used when the published category is missing or vague.
+DISH_MARKERS = {
+    'Breakfast': r'\b(breakfast|granola|porridge|oatmeal|overnight oats|'
+                 r'pancakes?|waffles?|french toast|muesli|scramble|'
+                 r'shakshuka|hash browns?|bagels?|toast)\b',
+    'Salad': r'\b(salad|slaw|coleslaw|tabbouleh|panzanella)\b',
+    'Soup': r'\b(soup|broth|bisque|chowder|gazpacho|ramen|pho|minestrone)\b',
+    'Stew': r'\b(stew|casserole|hotpot|hot pot|goulash|tagine|cassoulet|'
+            r'gumbo|chill?i (con|sin|non) carne|(bean|lentil|veggie) chill?i)\b',
+    'Curry': r'\b(curry|curried|masala|dal\b|daal|dhal|korma|tikka|rendang|'
+             r'vindaloo|katsu curry)\b',
+    'Pasta': r'\b(pasta|spaghetti|lasagne|lasagna|linguine|penne|rigatoni|'
+             r'fettuccine|tagliatelle|macaroni|gnocchi|ravioli|orzo|'
+             r'carbonara|bolognese)\b',
+    'Noodles': r'\b(noodles?|udon|soba|lo mein|chow mein|pad thai|'
+               r'rice noodles?|vermicelli)\b',
+    'Stir-fry': r'\b(stir[ -]?fry|stir[ -]?fried|fried rice)\b',
+    'Sandwich': r'\b(sandwich|wraps?|burritos?|tacos?|quesadillas?|panini|'
+                r'bagel sandwich|banh mi|toastie)\b',
+    'Burger': r'\b(burgers?|patties|patty)\b',
+    'Pizza': r'\b(pizza|calzone|flatbread)\b',
+    'Bowl': r'\b(bowls?|buddha bowl|grain bowl|poke)\b',
+    'Dip': r'\b(dip|hummus|guacamole|baba ganoush|salsa|spread|pate|p[aâ]t[eé])\b',
+    'Sauce': r'\b(sauce|pesto|marinara|gravy|chutney|relish|ketchup|'
+             r'harissa|romesco|aioli|mayo|mayonnaise|seasoning|spice mix|'
+             r'spice blend|marinade)\b',
+    'Dressing': r'\b(dressing|vinaigrette)\b',
+    'Bread': r'\b(bread|focaccia|ciabatta|baguette|naan|chapati|roti|'
+             r'paratha|tortillas?|pitta|pita|scones?|crackers?|'
+             r'breadsticks?|pretzels?|pupusas?|sourdough|'
+             r'(bread|dinner|bread ?rolls?) rolls?|bread ?rolls?)\b',
+    'Dessert': r'\b(dessert|pudding|trifle|tiramisu|mousse|cheesecake|'
+               r'crumble|cobbler|tart|pie|doughnuts?|donuts?|fudge|'
+               r'truffles?|ladoo|laddu|halwa|barfi|churros?)\b',
+    'Cake': r'\b(cakes?|cupcakes?|muffins?|brownies?|blondies?|loaf cake|'
+            r'banana bread|sponge)\b',
+    'Cookies': r'\b(cookies?|biscuits?|shortbread|flapjacks?|'
+               r'digestives?|macarons?)\b',
+    'Ice Cream': r'\b(ice cream|nice cream|sorbet|gelato|popsicles?|'
+                 r'ice lolly|frozen yogh?urt)\b',
+    'Smoothie': r'\b(smoothies?|shakes?|juice|lassi)\b',
+    'Drink': r'\b(drinks?|latte|coffee|tea\b|hot chocolate|cocktails?|'
+             r'mocktails?|lemonade|horchata|chai)\b',
+    'Snack': r'\b(snacks?|energy balls?|bliss balls?|bars?|popcorn|'
+             r'trail mix|chips|crisps|nuggets?|fritters?|samosas?|'
+             r'spring rolls?|dumplings?|gyoza|pakoras?)\b',
+    'Side': r'\b(sides?|fries|mashed|roast potatoes|rice pilaf|pilau|'
+            r'stuffing|pickles?|kimchi|sauerkraut)\b',
+    'Staple': r'\b(vegan (cheese|butter|milk|cream|yogh?urt|mayo|egg)|'
+              r'homemade (cheese|milk|butter|yogh?urt|pasta|stock)|'
+              r'nut milk|oat milk|cashew cream|seitan|aquafaba|'
+              r'spice (mix|blend)|seasoning)\b',
+}
+
+DISH_RE = {name: re.compile(p, re.I) for name, p in DISH_MARKERS.items()}
+
+# Sweet things are never also a Main or a Side.
+SWEET = {'Dessert', 'Cake', 'Cookies', 'Ice Cream', 'Smoothie', 'Drink'}
+# Accompaniments are never a Main either.
+NOT_MAIN = SWEET | {'Sauce', 'Dressing', 'Dip', 'Snack', 'Side', 'Bread',
+                    'Baking', 'Starter', 'Staple'}
+# Dishes that are a meal in themselves.
+IMPLIES_MAIN = {'Curry', 'Stew', 'Soup', 'Pasta', 'Noodles', 'Stir-fry',
+                'Pizza', 'Burger', 'Bowl', 'Bake', 'Sandwich'}
+
+MAX_DISH_TYPES = 3
+
+
+def _published_dish_types(node: dict) -> List[str]:
+    found = []
+    for key in ('recipeCategory', 'keywords'):
+        raw = node.get(key)
+        if isinstance(raw, str):
+            raw = re.split(r'[,;/|]', raw)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            key_text = re.sub(r'[^a-z ]', ' ', item.lower()).strip()
+            key_text = re.sub(r'\s+', ' ', key_text)
+            hit = DISH_ALIASES.get(key_text)
+            if hit and hit not in found:
+                found.append(hit)
+    return found
+
+
+def dish_types(node: dict, url: str) -> List[str]:
+    """Course and meal categories for a recipe. May be several."""
+    title = node.get('name') or ''
+    if isinstance(title, list):
+        title = title[0] if title else ''
+    slug = urlparse(url).path.replace('-', ' ')
+    text = f"{title} {slug}"
+
+    found = _published_dish_types(node)
+    for name, rx in DISH_RE.items():
+        if rx.search(text) and name not in found:
+            found.append(name)
+
+    if not found:
+        return []
+
+    # A dessert is not a main course; a dressing is not a side.
+    if SWEET & set(found):
+        found = [f for f in found if f not in ('Main', 'Side', 'Starter')]
+
+    if 'Main' not in found and (IMPLIES_MAIN & set(found)) and not (NOT_MAIN & set(found)):
+        found.append('Main')
+
+    # Keep the most specific ones — Main and Side are the vaguest.
+    order = {name: i for i, name in enumerate(found)}
+    found.sort(key=lambda f: (f in ('Main', 'Side'), order[f]))
+    return found[:MAX_DISH_TYPES]
+
+
 def normalise_cuisine(raw) -> Optional[str]:
     """Map a site's recipeCuisine string onto a canonical name."""
     if isinstance(raw, list):
@@ -943,6 +1090,7 @@ class Verdict:
     coverage: float = 0.0
     tags: List[str] = field(default_factory=list)
     cuisine: Optional[str] = None
+    categories: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
         if not self.macros:
@@ -992,9 +1140,11 @@ def analyse(url: str, soup) -> Verdict:
             tags.append('macros-estimated')
 
     cuisine = cuisine_for(node, url, ingredients) if SET_CUISINE else None
+    categories = ([cuisine] if cuisine else []) + dish_types(node, url)
 
     return Verdict(vegan=True, macros=macros, estimated=estimated,
-                   coverage=coverage, tags=tags, cuisine=cuisine)
+                   coverage=coverage, tags=tags, cuisine=cuisine,
+                   categories=categories)
 
 
 # ---------------------------------------------------------------------------
@@ -1122,10 +1272,11 @@ def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
         payload['nutrition'] = _nutrition_payload(verdict.macros)
         payload['settings'] = _settings_with_nutrition(session, slug)
 
-    if SET_CUISINE and verdict.cuisine:
-        cat = _ensure_category(session, verdict.cuisine)
-        if cat:
-            payload['recipeCategory'] = [cat]
+    if SET_CUISINE and verdict.categories:
+        cats = [c for c in (_ensure_category(session, n)
+                            for n in verdict.categories) if c]
+        if cats:
+            payload['recipeCategory'] = cats
 
     if not payload:
         return False
@@ -1135,8 +1286,8 @@ def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
                           headers=_headers(), json=payload, timeout=20)
         if r.status_code in (200, 201):
             label = ', '.join(verdict.tags)
-            if verdict.cuisine:
-                label = f"{verdict.cuisine} | {label}"
+            if verdict.categories:
+                label = f"{' + '.join(verdict.categories)} | {label}"
             logger.info(f"   🏷️  {slug}: {label} — {verdict.summary()}")
             return True
         logger.warning(f"   Write-back failed for {slug}: HTTP {r.status_code}")
