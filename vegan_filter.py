@@ -13,8 +13,13 @@ Drop this file next to dredger.py. It does three things:
    (protein-high, carb-low, fibre-high …) so you can filter in the sidebar,
    since Mealie can't filter on numeric nutrition.
 
-3. apply_to_mealie(session, slug, verdict) — writes the macros into Mealie's
-   built-in nutrition fields and attaches the tags, in one PATCH.
+3. Verdict.cuisine — region of origin (Indian, Mexican, Italian …), taken
+   from the recipe's own recipeCuisine field, else inferred from marker
+   ingredients and title words, else from the source blog.
+
+4. apply_to_mealie(session, slug, verdict) — writes the macros into Mealie's
+   built-in nutrition fields, attaches the tags, and sets the cuisine as a
+   Mealie category, in one PATCH.
 
 Env vars:
   VEGAN_ONLY=true                     reject non-vegan recipes
@@ -29,12 +34,15 @@ Env vars:
   FAT_HIGH=25      FAT_MED=10         g per serving
   FIBRE_HIGH=8     FIBRE_MED=4        g per serving
   CAL_HIGH=700     CAL_MED=400        kcal per serving
+  SET_CUISINE=true                    set region of origin as a Mealie category
+  CUISINE_MIN_SCORE=2                 marker score needed to infer a cuisine
 """
 
 import json
 import os
 import re
 import logging
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -56,6 +64,8 @@ WRITE_NUTRITION = os.getenv('WRITE_NUTRITION', 'true').lower() == 'true'
 BAND_TAGS = [b.strip().lower() for b in
              os.getenv('BAND_TAGS', 'protein,carb,fibre').split(',') if b.strip()]
 MIN_COVERAGE = _f('MIN_COVERAGE', 0.7)
+SET_CUISINE = os.getenv('SET_CUISINE', 'true').lower() == 'true'
+CUISINE_MIN_SCORE = _f('CUISINE_MIN_SCORE', 2)
 
 # Band thresholds, per serving. (macro key, tag prefix, med, high)
 BANDS = [
@@ -608,6 +618,209 @@ def estimate_macros(ingredients: List[str], servings: float
     return per_serving, round(coverage, 2)
 
 
+
+# ---------------------------------------------------------------------------
+# 2b. CUISINE / REGION OF ORIGIN
+# ---------------------------------------------------------------------------
+
+# Canonical names, and how the messy strings sites publish map onto them.
+CUISINE_ALIASES = {
+    'indian': 'Indian', 'north indian': 'Indian', 'south indian': 'Indian',
+    'punjabi': 'Indian', 'gujarati': 'Indian', 'bengali': 'Indian',
+    'sri lankan': 'Sri Lankan', 'nepali': 'Nepali', 'pakistani': 'Pakistani',
+    'chinese': 'Chinese', 'sichuan': 'Chinese', 'szechuan': 'Chinese',
+    'cantonese': 'Chinese', 'taiwanese': 'Taiwanese',
+    'japanese': 'Japanese', 'korean': 'Korean',
+    'thai': 'Thai', 'vietnamese': 'Vietnamese', 'filipino': 'Filipino',
+    'indonesian': 'Indonesian', 'malaysian': 'Malaysian', 'burmese': 'Burmese',
+    'asian': 'Asian', 'east asian': 'Asian', 'southeast asian': 'Asian',
+    'mexican': 'Mexican', 'tex mex': 'Mexican', 'tex-mex': 'Mexican',
+    'latin': 'Latin American', 'latin american': 'Latin American',
+    'peruvian': 'Latin American', 'brazilian': 'Brazilian',
+    'caribbean': 'Caribbean', 'jamaican': 'Caribbean', 'cuban': 'Caribbean',
+    'italian': 'Italian', 'sicilian': 'Italian', 'tuscan': 'Italian',
+    'french': 'French', 'spanish': 'Spanish', 'portuguese': 'Portuguese',
+    'greek': 'Greek', 'mediterranean': 'Mediterranean',
+    'british': 'British', 'english': 'British', 'scottish': 'British',
+    'irish': 'Irish', 'welsh': 'British', 'uk': 'British',
+    'american': 'American', 'southern': 'American', 'cajun': 'American',
+    'creole': 'American', 'californian': 'American', 'canadian': 'Canadian',
+    'german': 'German', 'austrian': 'German', 'swiss': 'German',
+    'polish': 'Eastern European', 'russian': 'Eastern European',
+    'ukrainian': 'Eastern European', 'hungarian': 'Eastern European',
+    'eastern european': 'Eastern European',
+    'nordic': 'Nordic', 'scandinavian': 'Nordic', 'swedish': 'Nordic',
+    'danish': 'Nordic', 'norwegian': 'Nordic', 'finnish': 'Nordic',
+    'turkish': 'Turkish', 'lebanese': 'Middle Eastern',
+    'israeli': 'Middle Eastern', 'persian': 'Middle Eastern',
+    'iranian': 'Middle Eastern', 'syrian': 'Middle Eastern',
+    'middle eastern': 'Middle Eastern', 'moroccan': 'North African',
+    'tunisian': 'North African', 'algerian': 'North African',
+    'egyptian': 'North African', 'north african': 'North African',
+    'ethiopian': 'Ethiopian', 'eritrean': 'Ethiopian',
+    'nigerian': 'West African', 'ghanaian': 'West African',
+    'senegalese': 'West African', 'west african': 'West African',
+    'south african': 'African', 'kenyan': 'African', 'african': 'African',
+    'hawaiian': 'Hawaiian', 'australian': 'Australian',
+}
+
+# Marker ingredients and title words. Weight 2 = distinctive enough on its own
+# when paired with anything else; weight 1 = suggestive only.
+CUISINE_MARKERS = {
+    'Indian': [(2, r'\b(garam masala|asafoetida|hing|amchur|curry leaf|curry leaves|'
+                   r'ghee substitute|besan|paneer|chana masala|tikka|masala dosa|'
+                   r'idli|sambar|rajma|dal makhani|tandoori|biryani|naan|chapati|'
+                   r'roti|paratha|jeera|methi|kadhi|poha|upma)\b'),
+               (1, r'\b(turmeric|cumin seed|coriander seed|cardamom|mustard seed|'
+                   r'basmati|lentil dal|dal|curry|chutney|ginger garlic paste)\b')],
+    'Chinese': [(2, r'\b(shaoxing|doubanjiang|sichuan peppercorn|szechuan|'
+                    r'chinkiang|black vinegar|hoisin|five spice|wood ear|'
+                    r'bok choy|gai lan|mapo|kung pao|lo mein|chow mein|'
+                    r'wonton|dumpling wrapper|char siu|dan dan)\b'),
+                (1, r'\b(soy sauce|sesame oil|rice wine|scallion|ginger|'
+                    r'stir fry|stir-fry|noodle)\b')],
+    'Japanese': [(2, r'\b(miso|mirin|sake|dashi kombu|kombu|nori|wasabi|'
+                     r'panko|udon|soba|ramen|teriyaki|edamame|shiso|'
+                     r'yuzu|katsu|onigiri|tempura|okonomiyaki|matcha)\b'),
+                 (1, r'\b(rice vinegar|sushi|japanese)\b')],
+    'Korean': [(2, r'\b(gochujang|gochugaru|kimchi|doenjang|bibimbap|'
+                   r'tteokbokki|banchan|bulgogi|japchae|perilla)\b'), (1, r'\b(korean)\b')],
+    'Thai': [(2, r'\b(lemongrass|galangal|kaffir lime|thai basil|'
+                 r'red curry paste|green curry paste|massaman|pad thai|'
+                 r'tom yum|tom kha|palm sugar)\b'), (1, r'\b(coconut milk curry|thai)\b')],
+    'Vietnamese': [(2, r'\b(pho|banh mi|rice paper|vermicelli noodle|'
+                       r'nuoc cham|vietnamese)\b'), (1, r'\b(lemongrass|mint|coriander)\b')],
+    'Mexican': [(2, r'\b(tortilla|masa harina|chipotle|adobo|poblano|jalape|'
+                    r'ancho|guajillo|tomatillo|salsa verde|enchilada|'
+                    r'taco|burrito|quesadilla|tostada|elote|pico de gallo|'
+                    r'refried|mole|nopales)\b'),
+                (1, r'\b(black bean|lime|cilantro|avocado|cumin)\b')],
+    'Caribbean': [(2, r'\b(jerk seasoning|scotch bonnet|allspice|callaloo|'
+                      r'plantain|ackee|jamaican|caribbean)\b'), (1, r'\b(coconut|thyme)\b')],
+    'Italian': [(2, r'\b(arborio|risotto|passata|pasta e|gnocchi|polenta|'
+                    r'lasagne|lasagna|bolognese|puttanesca|cacio|pesto|'
+                    r'bruschetta|focaccia|ciabatta|tiramisu|orecchiette|'
+                    r'pappardelle|tagliatelle|rigatoni|penne|spaghetti|'
+                    r'balsamic|marinara)\b'),
+                (1, r'\b(basil|oregano|olive oil|tomato|garlic)\b')],
+    'French': [(2, r'\b(ratatouille|baguette|dijon|herbes de provence|'
+                   r'tarte tatin|cassoulet|gratin|beurre|croissant|'
+                   r'bouillabaisse|provencal|proven|crepe|cr[eê]pe|'
+                   r'shallot|tarragon|puy lentil)\b'), (1, r'\b(thyme|bay leaf|white wine)\b')],
+    'Spanish': [(2, r'\b(paella|smoked paprika|piment[oó]n|sofrito|'
+                    r'romesco|gazpacho|patatas bravas|manchego|saffron rice|'
+                    r'spanish)\b'), (1, r'\b(saffron|olive|sherry vinegar)\b')],
+    'Greek': [(2, r'\b(greek|tzatziki|spanakopita|dolma|orzo|'
+                  r'kalamata|gyro|souvlaki|filo|phyllo)\b'), (1, r'\b(oregano|lemon|olive)\b')],
+    'Middle Eastern': [(2, r'\b(za\'?atar|sumac|tahini sauce|labneh|baharat|'
+                           r'pomegranate molasses|freekeh|bulgur|falafel|'
+                           r'shawarma|baba ganoush|muhammara|fattoush|'
+                           r'tabbouleh|halloumi|pita|hummus|dukkah|'
+                           r'rose water|pistachio|persian|lebanese)\b'),
+                       (1, r'\b(chickpea|parsley|mint|cinnamon)\b')],
+    'Turkish': [(2, r'\b(turkish|pide|menemen|borek|b[oö]rek|'
+                    r'pul biber|aleppo pepper)\b'), (1, r'\b(yogurt|bulgur)\b')],
+    'North African': [(2, r'\b(harissa|ras el hanout|preserved lemon|couscous|'
+                          r'tagine|moroccan|merguez|chermoula|'
+                          r'north african)\b'), (1, r'\b(cinnamon|apricot|almond|date)\b')],
+    'Ethiopian': [(2, r'\b(berbere|injera|teff|niter kibbeh|mitmita|'
+                      r'ethiopian|shiro|wat\b)\b'), (1, r'\b(lentil|collard)\b')],
+    'West African': [(2, r'\b(jollof|egusi|fufu|suya|scotch bonnet|'
+                         r'nigerian|ghanaian|west african|plantain)\b'),
+                     (1, r'\b(peanut|palm oil|okra)\b')],
+    'British': [(2, r'\b(british|shepherd\'?s pie|cottage pie|toad in the hole|'
+                    r'bubble and squeak|crumpet|scone|yorkshire pudding|'
+                    r'bangers|mushy pea|marmite|piccalilli|treacle|'
+                    r'sticky toffee|eccles|cornish|ploughman|'
+                    r'full english|shortbread|flapjack|trifle)\b'),
+                (1, r'\b(golden syrup|self raising|swede|parsnip|custard)\b')],
+    'Irish': [(2, r'\b(irish|colcannon|champ|soda bread|boxty)\b'), (1, r'\b(potato|cabbage)\b')],
+    'American': [(2, r'\b(cornbread|grits|biscuits and gravy|sloppy joe|'
+                     r'mac and cheese|jambalaya|gumbo|po\'? ?boy|'
+                     r'buffalo sauce|ranch dressing|s\'?mores|'
+                     r'pumpkin pie|thanksgiving|bbq sauce|barbecue sauce|'
+                     r'cajun|creole|pancake stack|brownie|'
+                     r'chocolate chip cookie|meatloaf|coleslaw|'
+                     r'sloppy|philly)\b'),
+                 (1, r'\b(maple syrup|graham|all purpose flour|cup of)\b')],
+    'German': [(2, r'\b(german|sauerkraut|spaetzle|sp[aä]tzle|pretzel|'
+                   r'schnitzel|strudel|rye bread|quark)\b'), (1, r'\b(caraway|mustard|dill)\b')],
+    'Eastern European': [(2, r'\b(borscht|borsch|pierogi|golabki|kasha|'
+                             r'polish|ukrainian|russian|hungarian|'
+                             r'paprikash|goulash|blini)\b'), (1, r'\b(beetroot|dill|cabbage)\b')],
+    'Nordic': [(2, r'\b(nordic|scandinavian|swedish|danish|norwegian|'
+                   r'cardamom bun|rye crisp|smorgas|lingonberry)\b'), (1, r'\b(rye|dill|caraway)\b')],
+    'Mediterranean': [(2, r'\b(mediterranean)\b'), (1, r'\b(olive oil|lemon|oregano|chickpea)\b')],
+}
+
+CUISINE_RE = {name: [(w, re.compile(p, re.I)) for w, p in pats]
+              for name, pats in CUISINE_MARKERS.items()}
+
+# Blogs whose output is overwhelmingly one cuisine — a weak fallback only.
+SITE_CUISINE = {
+    'veganricha.com': 'Indian',
+    'cookwithmanali.com': 'Indian',
+    'pipingpotcurry.com': 'Indian',
+    'holycowvegan.net': 'Indian',
+    'woonheng.com': 'Chinese',
+    'okonomikitchen.com': 'Japanese',
+    'thefoodietakesflight.com': 'Asian',
+    'theplantbasedschool.com': 'Italian',
+    'schoolnightvegan.com': 'British',
+    'romylondonuk.com': 'British',
+    'thelittleblogofvegan.com': 'British',
+    'avirtualvegan.com': 'British',
+}
+
+
+def normalise_cuisine(raw) -> Optional[str]:
+    """Map a site's recipeCuisine string onto a canonical name."""
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    if not isinstance(raw, str):
+        return None
+    key = re.sub(r'[^a-z ]', ' ', raw.lower()).strip()
+    key = re.sub(r'\s+', ' ', key)
+    if key in CUISINE_ALIASES:
+        return CUISINE_ALIASES[key]
+    for alias, canonical in CUISINE_ALIASES.items():
+        if re.search(rf'\b{re.escape(alias)}\b', key):
+            return canonical
+    return None
+
+
+def infer_cuisine(title: str, ingredients: List[str]) -> Tuple[Optional[str], int]:
+    """Score marker words across the title and ingredient list."""
+    text = ' '.join([title or ''] + [str(i) for i in ingredients]).lower()
+    scores = {}
+    for name, pats in CUISINE_RE.items():
+        score = 0
+        for weight, rx in pats:
+            hits = len(rx.findall(text))
+            if hits:
+                score += weight * min(hits, 3)
+        if score:
+            scores[name] = score
+    if not scores:
+        return None, 0
+    best = max(scores, key=scores.get)
+    return best, scores[best]
+
+
+def cuisine_for(node: dict, url: str, ingredients: List[str]) -> Optional[str]:
+    published = normalise_cuisine(node.get('recipeCuisine'))
+    if published:
+        return published
+
+    title = node.get('name') or ''
+    guess, score = infer_cuisine(title, ingredients)
+    if guess and score >= CUISINE_MIN_SCORE:
+        return guess
+
+    host = urlparse(url).netloc.lower().replace('www.', '')
+    return SITE_CUISINE.get(host)
+
+
 def _num(text) -> Optional[float]:
     if text is None:
         return None
@@ -690,6 +903,7 @@ class Verdict:
     estimated: bool = False
     coverage: float = 0.0
     tags: List[str] = field(default_factory=list)
+    cuisine: Optional[str] = None
 
     def summary(self) -> str:
         if not self.macros:
@@ -735,8 +949,10 @@ def analyse(url: str, soup) -> Verdict:
         if estimated:
             tags.append('macros-estimated')
 
+    cuisine = cuisine_for(node, url, ingredients) if SET_CUISINE else None
+
     return Verdict(vegan=True, macros=macros, estimated=estimated,
-                   coverage=coverage, tags=tags)
+                   coverage=coverage, tags=tags, cuisine=cuisine)
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +996,42 @@ def _ensure_tag(session, name: str) -> Optional[dict]:
             return _tag_cache.get(name.lower())
     except Exception as e:
         logger.debug(f"Tag create failed for {name}: {e}")
+    return None
+
+
+_category_cache = {}
+
+
+def _load_categories(session):
+    if _category_cache:
+        return
+    try:
+        r = session.get(f"{MEALIE_URL}/api/organizers/categories",
+                        headers=_headers(), params={"perPage": 200}, timeout=20)
+        if r.status_code == 200:
+            for item in r.json().get('items', []):
+                _category_cache[item['name'].lower()] = item
+    except Exception as e:
+        logger.debug(f"Category list failed: {e}")
+
+
+def _ensure_category(session, name: str) -> Optional[dict]:
+    _load_categories(session)
+    if name.lower() in _category_cache:
+        return _category_cache[name.lower()]
+    try:
+        r = session.post(f"{MEALIE_URL}/api/organizers/categories",
+                         headers=_headers(), json={"name": name}, timeout=20)
+        if r.status_code in (200, 201):
+            cat = r.json()
+            _category_cache[name.lower()] = cat
+            return cat
+        if r.status_code == 409:
+            _category_cache.clear()
+            _load_categories(session)
+            return _category_cache.get(name.lower())
+    except Exception as e:
+        logger.debug(f"Category create failed for {name}: {e}")
     return None
 
 
@@ -828,6 +1080,11 @@ def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
         payload['nutrition'] = _nutrition_payload(verdict.macros)
         payload['settings'] = _settings_with_nutrition(session, slug)
 
+    if SET_CUISINE and verdict.cuisine:
+        cat = _ensure_category(session, verdict.cuisine)
+        if cat:
+            payload['recipeCategory'] = [cat]
+
     if not payload:
         return False
 
@@ -835,7 +1092,10 @@ def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
         r = session.patch(f"{MEALIE_URL}/api/recipes/{slug}",
                           headers=_headers(), json=payload, timeout=20)
         if r.status_code in (200, 201):
-            logger.info(f"   🏷️  {slug}: {', '.join(verdict.tags)} — {verdict.summary()}")
+            label = ', '.join(verdict.tags)
+            if verdict.cuisine:
+                label = f"{verdict.cuisine} | {label}"
+            logger.info(f"   🏷️  {slug}: {label} — {verdict.summary()}")
             return True
         logger.warning(f"   Write-back failed for {slug}: HTTP {r.status_code}")
     except Exception as e:

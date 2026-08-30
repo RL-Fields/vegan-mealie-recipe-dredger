@@ -47,8 +47,19 @@ Nothing upstream was removed, so `git pull` conflicts stay small.
    Estimated recipes also get `macros-estimated`, so you can tell a published
    figure from a calculated one when filtering. All thresholds are `.env` settings.
 
-Filter in Mealie with the tag sidebar, or save a cookbook on
-`vegan AND protein-high` so it stays current as more get imported.
+7. **Region of origin** — set as a Mealie **category** (Indian, Mexican,
+   Italian, British, Ethiopian, Middle Eastern…), so regions stay separate
+   from the macro tags. Taken from the recipe's own `recipeCuisine` field
+   where the site publishes one — normalised, so "Tex-Mex" becomes Mexican
+   and "Sichuan" becomes Chinese — otherwise inferred by scoring marker
+   ingredients and title words (garam masala and amchur → Indian, gochujang
+   and kimchi → Korean, berbere and injera → Ethiopian, marmite and swede →
+   British). Recipes with no regional signal get no category rather than a
+   guess; raise `CUISINE_MIN_SCORE` to make it stricter. A handful of
+   single-cuisine blogs act as a last-resort fallback.
+
+Filter in Mealie with the tag sidebar and the category list, or save a cookbook
+on `vegan AND protein-high AND Indian` so it stays current as more get imported.
 
 ## New .env settings
 
