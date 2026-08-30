@@ -796,6 +796,22 @@ def _nutrition_payload(macros: Dict[str, float]) -> Dict[str, str]:
             for key, field in mapping.items() if key in macros}
 
 
+def _settings_with_nutrition(session, slug: str) -> Optional[dict]:
+    """Mealie hides the nutrition panel unless the recipe's showNutrition flag
+    is set, so read the current settings and flip just that one."""
+    try:
+        r = session.get(f"{MEALIE_URL}/api/recipes/{slug}",
+                        headers=_headers(), timeout=20)
+        if r.status_code != 200:
+            return {"showNutrition": True}
+        settings = r.json().get('settings') or {}
+    except Exception as e:
+        logger.debug(f"Could not read settings for {slug}: {e}")
+        return {"showNutrition": True}
+    settings['showNutrition'] = True
+    return settings
+
+
 def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
     """Attach tags and nutrition to an imported Mealie recipe."""
     if not slug:
@@ -810,6 +826,7 @@ def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
 
     if WRITE_NUTRITION and verdict.macros:
         payload['nutrition'] = _nutrition_payload(verdict.macros)
+        payload['settings'] = _settings_with_nutrition(session, slug)
 
     if not payload:
         return False
