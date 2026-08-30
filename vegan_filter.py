@@ -59,6 +59,12 @@ def _f(name, default):
 MEALIE_URL = os.getenv('MEALIE_URL', 'http://localhost:9000').rstrip('/')
 MEALIE_API_TOKEN = os.getenv('MEALIE_API_TOKEN', '')
 VEGAN_ONLY = os.getenv('VEGAN_ONLY', 'true').lower() == 'true'
+# Reject recipes whose ingredients cannot be read at all. Without this a page
+# with no Schema.org JSON-LD is imported and tagged vegan on the strength of
+# the site it came from — a safe bet for a curated list, not for a site added
+# to _sites.txt this morning.
+VEGAN_REQUIRE_INGREDIENTS = os.getenv(
+    'VEGAN_REQUIRE_INGREDIENTS', 'true').lower() == 'true'
 TAG_RECIPES = os.getenv('TAG_RECIPES', 'true').lower() == 'true'
 WRITE_NUTRITION = os.getenv('WRITE_NUTRITION', 'true').lower() == 'true'
 BAND_TAGS = [b.strip().lower() for b in
@@ -1151,12 +1157,21 @@ class Verdict:
 def analyse(url: str, soup) -> Verdict:
     node = extract_recipe_jsonld(soup)
     if not node:
-        return Verdict(vegan=True, tags=['vegan', 'macros-unknown'])
+        if VEGAN_ONLY and VEGAN_REQUIRE_INGREDIENTS:
+            return Verdict(vegan=False,
+                           reason="no ingredient list to check")
+        return Verdict(vegan=True, tags=['vegan-unverified', 'macros-unknown'])
 
     raw_ings = node.get('recipeIngredient') or node.get('ingredients') or []
     if isinstance(raw_ings, str):
         raw_ings = [raw_ings]
     ingredients = [i for i in raw_ings if isinstance(i, str)]
+
+    if not ingredients:
+        if VEGAN_ONLY and VEGAN_REQUIRE_INGREDIENTS:
+            return Verdict(vegan=False,
+                           reason="empty ingredient list, nothing to check")
+        return Verdict(vegan=True, tags=['vegan-unverified', 'macros-unknown'])
 
     is_vegan, offender = check_vegan(ingredients)
     if not is_vegan:

@@ -33,6 +33,12 @@ first, so vegan butter, peanut butter, butter beans, almond milk, flax eggs,
 eggplant, chickpeas, beefsteak tomatoes, king oyster mushrooms and nutritional
 yeast all pass cleanly. **A hit means the recipe is rejected, not imported.**
 
+A page with no readable ingredient list is also rejected, rather than being
+imported and tagged vegan on the strength of the site it came from. That
+assumption was safe when every site was hand-picked; it isn't for a site added
+to `_sites.txt` this morning. Set `VEGAN_REQUIRE_INGREDIENTS=false` to import
+them instead, tagged `vegan-unverified`.
+
 **3 · Macros** — the site's published nutrition is used where it exists.
 Otherwise they're estimated from the ingredients: a ~300-entry table of per-100g
 values covering proteins, legumes, grains, flours, pasta, nuts, seeds, oils,
@@ -283,10 +289,10 @@ Nothing upstream was removed, so `git pull upstream main` stays mergeable.
   behind it.
 - **Published nutrition is taken as authoritative**, so a blog with junk figures
   produces junk here. Nothing is cross-checked.
-- **The vegan gate needs JSON-LD ingredients.** Pages without them are imported
-  and tagged `macros-unknown` rather than dropped — reasonable on a vegan-only
-  site list. To reject them instead, edit the `if not node:` branch in
-  `analyse()`.
+- **The vegan gate needs JSON-LD ingredients.** Pages without them are rejected
+  by default, which loses the occasional genuinely vegan recipe from a
+  badly-marked-up page. `VEGAN_REQUIRE_INGREDIENTS=false` imports them instead,
+  tagged `vegan-unverified`.
 - **Region and dish type are inferred from words**, so an unusual name will be
   missed or occasionally mislabelled. Raise `CUISINE_MIN_SCORE` to be stricter.
 - **Existing recipes aren't backfilled.** Everything here applies at import.
