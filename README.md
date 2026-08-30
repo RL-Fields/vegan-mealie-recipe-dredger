@@ -97,31 +97,7 @@ recipes arrive.
 
 ---
 
-## Blocked sites
 
-Some blogs serve pages happily to this tool but refuse Mealie's scraper —
-Mealie returns HTTP 400 on every import from them. At the time of writing that
-included veganricha, cookwithmanali, thefoodietakesflight and
-shortgirltallorder, which between them are most of the Indian and Asian
-coverage.
-
-When Mealie refuses, the recipe is built here instead, from the JSON-LD already
-parsed: name, ingredients, instructions, description, yield, prep/cook/total
-times, source URL and image. Instructions are flattened across the four shapes
-sites actually publish — plain strings, newline blocks, `HowToStep` lists and
-nested `HowToSection` groups. Tags, macros and categories are applied exactly as
-for a scraped import, so the only difference is a `✅ [Local] Built from page
-data` line in the log.
-
-`check_blocked.py` surveys which sites are affected — it imports one real recipe
-per site and deletes it again:
-
-```bash
-docker compose run --rm -v /opt/recipe-dredger/check_blocked.py:/app/check_blocked.py \
-  -e LOG_LEVEL=WARNING mealie-recipe-dredger python check_blocked.py
-```
-
----
 
 ## Setup
 
