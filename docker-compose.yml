@@ -1,6 +1,7 @@
 services:
   mealie-recipe-dredger:
-    image: ghcr.io/d0rk4ce/mealie-recipe-dredger:latest
+    build: .
+    image: mealie-recipe-dredger-vegan:latest
     container_name: mealie-recipe-dredger
     
     # All secrets and configuration loaded from .env file
@@ -9,14 +10,14 @@ services:
     
     volumes:
       - ./data:/app/data                    # Persistent data (imported.json, rejects.json, etc.)
-      - ./sites.json:/app/sites.json:ro     # Custom site list (read-only)
+      - ./sites_vegan.json:/app/sites.json:ro   # Vegan-only site list (read-only)
     
     restart: "no"
     
   # 🧹 Maintenance: Master Cleaner
   # Run manually with: docker compose run --rm mealie-cleaner
   mealie-cleaner:
-    image: ghcr.io/d0rk4ce/mealie-recipe-dredger:latest
+    image: mealie-recipe-dredger-vegan:latest
     container_name: mealie-cleaner
     command: python maintenance/master_cleaner.py
     profiles: ["maintenance"]
