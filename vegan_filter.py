@@ -576,6 +576,7 @@ def estimate_macros(ingredients: List[str], servings: float
         m = QTY_RE.match(line)
         if not m:
             continue
+        has_qty = m.group('qty') is not None
         qty = _parse_qty(m.group('qty') or '')
         unit = (m.group('unit') or '').lower().rstrip('.')
         rest = m.group('rest') or ''
@@ -584,6 +585,12 @@ def estimate_macros(ingredients: List[str], servings: float
         if vals is None:
             continue
         recognised += 1
+
+        # "oil for frying", "coriander to serve", "flour as needed" — no
+        # quantity and no unit, so any weight we invent is a fabrication.
+        # Count it as recognised but contribute nothing.
+        if not has_qty and unit not in UNIT_GRAMS:
+            continue
 
         if unit in UNIT_GRAMS:
             grams = UNIT_GRAMS[unit]
@@ -685,9 +692,16 @@ CUISINE_MARKERS = {
                  (1, r'\b(rice vinegar|sushi|japanese)\b')],
     'Korean': [(2, r'\b(gochujang|gochugaru|kimchi|doenjang|bibimbap|'
                    r'tteokbokki|banchan|bulgogi|japchae|perilla)\b'), (1, r'\b(korean)\b')],
-    'Thai': [(2, r'\b(lemongrass|galangal|kaffir lime|thai basil|'
-                 r'red curry paste|green curry paste|massaman|pad thai|'
-                 r'tom yum|tom kha|palm sugar)\b'), (1, r'\b(coconut milk curry|thai)\b')],
+    'Thai': [(2, r'\b(thai basil|red curry paste|green curry paste|massaman|'
+                 r'pad thai|tom yum|tom kha|thai)\b'),
+             (1, r'\b(lemongrass|galangal|kaffir lime|palm sugar|coconut milk|'
+                 r'peanut|lime juice)\b')],
+    'Indonesian': [(2, r'\b(rendang|kecap manis|gado gado|nasi goreng|sambal oelek|'
+                       r'tempeh orek|indonesian|bumbu)\b'),
+                   (1, r'\b(lemongrass|galangal|coconut milk|palm sugar|tamarind)\b')],
+    'Malaysian': [(2, r'\b(laksa|nasi lemak|pandan|rendang|malaysian|'
+                      r'char kway|roti canai)\b'),
+                  (1, r'\b(lemongrass|coconut milk|tamarind)\b')],
     'Vietnamese': [(2, r'\b(pho|banh mi|rice paper|vermicelli noodle|'
                        r'nuoc cham|vietnamese)\b'), (1, r'\b(lemongrass|mint|coriander)\b')],
     'Mexican': [(2, r'\b(tortilla|masa harina|chipotle|adobo|poblano|jalape|'
@@ -704,7 +718,7 @@ CUISINE_MARKERS = {
                     r'balsamic|marinara)\b'),
                 (1, r'\b(basil|oregano|olive oil|tomato|garlic)\b')],
     'French': [(2, r'\b(ratatouille|baguette|dijon|herbes de provence|'
-                   r'tarte tatin|cassoulet|gratin|beurre|croissant|'
+                   r'tarte tatin|cassoulet|gratin|beurre|croissants?|'
                    r'bouillabaisse|provencal|proven|crepe|cr[eê]pe|'
                    r'shallot|tarragon|puy lentil)\b'), (1, r'\b(thyme|bay leaf|white wine)\b')],
     'Spanish': [(2, r'\b(paella|smoked paprika|piment[oó]n|sofrito|'
@@ -790,21 +804,31 @@ def normalise_cuisine(raw) -> Optional[str]:
 
 
 def infer_cuisine(title: str, ingredients: List[str]) -> Tuple[Optional[str], int]:
-    """Score marker words across the title and ingredient list."""
+    """Score marker words across the title and ingredient list.
+
+    Weak markers alone are not enough — cilantro and lime do not make a dish
+    Mexican, and maple syrup does not make it American. A cuisine is only
+    returned if at least one distinctive (weight 2) marker matched.
+    """
     text = ' '.join([title or ''] + [str(i) for i in ingredients]).lower()
-    scores = {}
+    scores, strong = {}, {}
     for name, pats in CUISINE_RE.items():
-        score = 0
+        score, strong_hits = 0, 0
         for weight, rx in pats:
             hits = len(rx.findall(text))
             if hits:
                 score += weight * min(hits, 3)
+                if weight >= 2:
+                    strong_hits += hits
         if score:
             scores[name] = score
-    if not scores:
+            strong[name] = strong_hits
+
+    qualified = {n: sc for n, sc in scores.items() if strong.get(n)}
+    if not qualified:
         return None, 0
-    best = max(scores, key=scores.get)
-    return best, scores[best]
+    best = max(qualified, key=qualified.get)
+    return best, qualified[best]
 
 
 def cuisine_for(node: dict, url: str, ingredients: List[str]) -> Optional[str]:
@@ -817,8 +841,13 @@ def cuisine_for(node: dict, url: str, ingredients: List[str]) -> Optional[str]:
     if guess and score >= CUISINE_MIN_SCORE:
         return guess
 
+    # Single-cuisine blogs are only a tiebreaker, not a blanket label — a
+    # chocolate chip cookie on a Japanese blog is not a Japanese recipe.
     host = urlparse(url).netloc.lower().replace('www.', '')
-    return SITE_CUISINE.get(host)
+    site_guess = SITE_CUISINE.get(host)
+    if site_guess and guess == site_guess:
+        return site_guess
+    return None
 
 
 def _num(text) -> Optional[float]:
@@ -880,6 +909,16 @@ def published_macros(node: dict) -> Optional[Dict[str, float]]:
     return {k: v for k, v in out.items() if v is not None}
 
 
+# Per-serving ceilings. Past these the servings count was almost certainly
+# wrong (a dressing that "makes 1 cup" counted as one portion), and a wrong
+# number in the nutrition panel is worse than none.
+IMPLAUSIBLE = {'kcal': 1200, 'fat': 100, 'protein': 120, 'carb': 200}
+
+
+def _plausible(macros: Dict[str, float]) -> bool:
+    return not any(macros.get(k, 0) > limit for k, limit in IMPLAUSIBLE.items())
+
+
 def band_tags(macros: Dict[str, float]) -> List[str]:
     tags = []
     for key, prefix, med, high in BANDS:
@@ -939,6 +978,9 @@ def analyse(url: str, soup) -> Verdict:
         estimated = macros is not None
         if macros is not None and coverage < MIN_COVERAGE:
             logger.debug(f"   Low ingredient coverage ({coverage}) for {url}")
+            macros = None
+        elif macros is not None and not _plausible(macros):
+            logger.debug(f"   Implausible estimate {macros} for {url}")
             macros = None
 
     tags = ['vegan']
