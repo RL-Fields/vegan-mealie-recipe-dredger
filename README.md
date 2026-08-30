@@ -97,6 +97,25 @@ numbers, which is what these are for:
 | `fat-high` / `-med` / `-low` | ≥25g / 10–25g / <10g | no |
 | `calorie-high` / `-med` / `-low` | ≥700 / 400–700 / <400 kcal | no |
 
+The same bands are also applied to the per-100g figures, suffixed `-100g`
+(`protein-high-100g`), with thresholds following food-labelling conventions
+rather than portion sizes:
+
+| Tag | Per 100g |
+|---|---|
+| `protein-*-100g` | high ≥10g / med ≥5g / low <5g |
+| `carb-*-100g` | high ≥25g / med ≥10g / low <10g |
+| `fibre-*-100g` | high ≥6g / med ≥3g / low <3g |
+| `fat-*-100g` | high ≥17.5g / med ≥3g / low <3g |
+| `calorie-*-100g` | high ≥250 / med ≥100 / low <100 kcal |
+
+Per-serving answers "is this meal high in protein"; per-100g answers "is this
+dish protein-dense", which is portion-independent and immune to a blog getting
+its servings count wrong. Peanut butter energy balls are `protein-low` per
+serving and `protein-high-100g` — both true, and useful for different
+questions. `BAND_BASIS` can be set to `serving` or `per100` if you only want
+one set.
+
 **Notes** — a "Macros per 100g" entry with the per-100g breakdown and the
 serving weight. Your own notes on a recipe are preserved; only ours is replaced
 on re-import.

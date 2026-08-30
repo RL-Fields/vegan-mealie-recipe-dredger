@@ -76,6 +76,20 @@ BANDS = [
     ('kcal',    'calorie', _f('CAL_MED', 400),    _f('CAL_HIGH', 700)),
 ]
 
+# Band thresholds per 100g — a density, not a portion, so these follow food
+# labelling conventions rather than the per-serving numbers: EU "high fibre"
+# is 6g/100g, UK traffic-light fat is low at 3g and high at 17.5g.
+BANDS_100G = [
+    ('protein', 'protein', _f('PROTEIN_MED_100G', 5),  _f('PROTEIN_HIGH_100G', 10)),
+    ('carb',    'carb',    _f('CARB_MED_100G', 10),    _f('CARB_HIGH_100G', 25)),
+    ('fat',     'fat',     _f('FAT_MED_100G', 3),      _f('FAT_HIGH_100G', 17.5)),
+    ('fibre',   'fibre',   _f('FIBRE_MED_100G', 3),    _f('FIBRE_HIGH_100G', 6)),
+    ('kcal',    'calorie', _f('CAL_MED_100G', 100),    _f('CAL_HIGH_100G', 250)),
+]
+
+# serving | per100 | both
+BAND_BASIS = os.getenv('BAND_BASIS', 'both').strip().lower()
+
 # ---------------------------------------------------------------------------
 # 1. VEGAN GATE
 # ---------------------------------------------------------------------------
@@ -1091,18 +1105,19 @@ def per_100g(macros: Dict[str, float], servings: float,
     return out
 
 
-def band_tags(macros: Dict[str, float]) -> List[str]:
+def band_tags(macros: Dict[str, float], bands=BANDS, suffix: str = "") -> List[str]:
     tags = []
-    for key, prefix, med, high in BANDS:
+    for key, prefix, med, high in bands:
         if prefix not in BAND_TAGS or key not in macros:
             continue
         val = macros[key]
         if val >= high:
-            tags.append(f"{prefix}-high")
+            band = 'high'
         elif val >= med:
-            tags.append(f"{prefix}-med")
+            band = 'med'
         else:
-            tags.append(f"{prefix}-low")
+            band = 'low'
+        tags.append(f"{prefix}-{band}{suffix}")
     return tags
 
 
@@ -1165,18 +1180,22 @@ def analyse(url: str, soup) -> Verdict:
             logger.debug(f"   Implausible estimate {macros} for {url}")
             macros = None
 
+    hundreds = None
     tags = ['vegan']
     if macros is None:
         tags.append('macros-unknown')
     else:
-        tags += band_tags(macros)
+        if BAND_BASIS in ('serving', 'both'):
+            tags += band_tags(macros)
+        hundreds = per_100g(macros, servings, total_grams, coverage)
+        if hundreds and BAND_BASIS in ('per100', 'both'):
+            tags += band_tags(hundreds, BANDS_100G, '-100g')
         if estimated:
             tags.append('macros-estimated')
 
     cuisine = cuisine_for(node, url, ingredients) if SET_CUISINE else None
     categories = ([cuisine] if cuisine else []) + dish_types(node, url)
 
-    hundreds = per_100g(macros, servings, total_grams, coverage) if macros else None
     serving_g = (round(total_grams / servings)
                  if total_grams and servings > 0 and coverage >= PER_100G_MIN_COVERAGE
                  else None)
