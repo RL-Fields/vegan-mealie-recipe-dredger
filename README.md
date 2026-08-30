@@ -68,8 +68,17 @@ present, otherwise the title and slug. A recipe can hold several — sweet thing
 never also get Main, dishes that are a meal in themselves pick up Main
 automatically, and it caps at three.
 
-**6 · Written to Mealie** — one PATCH sets the nutrition panel, the categories
-and the tags, and flips on `showNutrition` so the panel actually renders.
+**6 · Per 100g** — Mealie's nutrition panel is per-serving only, so the per-100g
+figures go in the recipe's Notes, along with the serving weight they're derived
+from. Both published and estimated recipes get them, since the ingredient
+weights come from the estimator either way. They're only published when at
+least 85% of ingredients were recognised — a missed ingredient shrinks the
+denominator and inflates every figure. **These are raw weights, before cooking
+loss**, so anything that boils down will read lighter per 100g than what ends
+up on the plate.
+
+**7 · Written to Mealie** — one PATCH sets the nutrition panel, the categories,
+the tags and the note, and flips on `showNutrition` so the panel renders.
 
 ---
 
@@ -87,6 +96,10 @@ numbers, which is what these are for:
 | `fibre-high` / `-med` / `-low` | ≥8g / 4–8g / <4g | yes |
 | `fat-high` / `-med` / `-low` | ≥25g / 10–25g / <10g | no |
 | `calorie-high` / `-med` / `-low` | ≥700 / 400–700 / <400 kcal | no |
+
+**Notes** — a "Macros per 100g" entry with the per-100g breakdown and the
+serving weight. Your own notes on a recipe are preserved; only ours is replaced
+on re-import.
 
 Plus `macros-estimated` where the numbers were calculated rather than
 published, and `macros-unknown` where neither was possible. Every threshold is

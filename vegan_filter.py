@@ -556,9 +556,11 @@ def _lookup(name: str) -> Optional[Tuple]:
 
 
 def estimate_macros(ingredients: List[str], servings: float
-                    ) -> Tuple[Optional[Dict[str, float]], float]:
-    """Per-serving macros and the fraction of ingredient lines recognised."""
+                    ) -> Tuple[Optional[Dict[str, float]], float, float]:
+    """Per-serving macros, the fraction of ingredient lines recognised, and
+    the total raw weight in grams (0 if it could not be worked out)."""
     totals = dict.fromkeys(MACRO_KEYS, 0.0)
+    total_grams = 0.0
     considered = 0
     recognised = 0
 
@@ -613,16 +615,17 @@ def estimate_macros(ingredients: List[str], servings: float
             scale = 1.0
 
         grams = min(grams, 3000)
+        total_grams += grams * scale
         for key, val in zip(MACRO_KEYS, vals):
             totals[key] += grams * val * scale / 100.0
 
     if recognised == 0 or servings <= 0:
-        return None, 0.0
+        return None, 0.0, 0.0
 
     coverage = recognised / considered if considered else 0.0
     per_serving = {k: round(v / servings, 1) for k, v in totals.items()}
     per_serving['kcal'] = round(per_serving['kcal'])
-    return per_serving, round(coverage, 2)
+    return per_serving, round(coverage, 2), round(total_grams)
 
 
 
@@ -1066,6 +1069,28 @@ def _plausible(macros: Dict[str, float]) -> bool:
     return not any(macros.get(k, 0) > limit for k, limit in IMPLAUSIBLE.items())
 
 
+# Per-100g needs a trustworthy total weight, so it is only published when
+# nearly every ingredient was recognised — a missed ingredient shrinks the
+# denominator and inflates every figure.
+PER_100G_MIN_COVERAGE = 0.85
+
+
+def per_100g(macros: Dict[str, float], servings: float,
+             total_grams: float, coverage: float) -> Optional[Dict[str, float]]:
+    """Scale per-serving macros to per 100g of raw ingredients."""
+    if not macros or servings <= 0 or total_grams <= 0:
+        return None
+    if coverage < PER_100G_MIN_COVERAGE:
+        return None
+    factor = (servings * 100.0) / total_grams
+    out = {k: round(v * factor, 1) for k, v in macros.items()}
+    out['kcal'] = round(out['kcal'])
+    # A plate of food is never denser than pure fat
+    if out['kcal'] > 900 or out['fat'] > 100:
+        return None
+    return out
+
+
 def band_tags(macros: Dict[str, float]) -> List[str]:
     tags = []
     for key, prefix, med, high in BANDS:
@@ -1091,15 +1116,21 @@ class Verdict:
     tags: List[str] = field(default_factory=list)
     cuisine: Optional[str] = None
     categories: List[str] = field(default_factory=list)
+    per100: Optional[Dict[str, float]] = None
+    serving_grams: Optional[int] = None
 
     def summary(self) -> str:
         if not self.macros:
             return "no macros"
         m = self.macros
         src = f"est {int(self.coverage * 100)}%" if self.estimated else "published"
-        return (f"{m.get('kcal', '?')} kcal, P{m.get('protein', '?')} "
-                f"C{m.get('carb', '?')} F{m.get('fat', '?')} "
-                f"Fib{m.get('fibre', '?')} ({src})")
+        out = (f"{m.get('kcal', '?')} kcal, P{m.get('protein', '?')} "
+               f"C{m.get('carb', '?')} F{m.get('fat', '?')} "
+               f"Fib{m.get('fibre', '?')} ({src})")
+        if self.per100:
+            p = self.per100
+            out += f" | /100g: {p['kcal']} kcal, P{p['protein']} C{p['carb']} F{p['fat']}"
+        return out
 
 
 def analyse(url: str, soup) -> Verdict:
@@ -1119,10 +1150,13 @@ def analyse(url: str, soup) -> Verdict:
     servings = _servings(node)
     macros = published_macros(node)
     estimated = False
-    coverage = 1.0
+
+    # Always run the estimator: even when the site publishes nutrition, its
+    # ingredient weights are what let us express the macros per 100g.
+    est_macros, coverage, total_grams = estimate_macros(ingredients, servings)
 
     if macros is None:
-        macros, coverage = estimate_macros(ingredients, servings)
+        macros = est_macros
         estimated = macros is not None
         if macros is not None and coverage < MIN_COVERAGE:
             logger.debug(f"   Low ingredient coverage ({coverage}) for {url}")
@@ -1142,9 +1176,15 @@ def analyse(url: str, soup) -> Verdict:
     cuisine = cuisine_for(node, url, ingredients) if SET_CUISINE else None
     categories = ([cuisine] if cuisine else []) + dish_types(node, url)
 
+    hundreds = per_100g(macros, servings, total_grams, coverage) if macros else None
+    serving_g = (round(total_grams / servings)
+                 if total_grams and servings > 0 and coverage >= PER_100G_MIN_COVERAGE
+                 else None)
+
     return Verdict(vegan=True, macros=macros, estimated=estimated,
                    coverage=coverage, tags=tags, cuisine=cuisine,
-                   categories=categories)
+                   categories=categories, per100=hundreds,
+                   serving_grams=serving_g)
 
 
 # ---------------------------------------------------------------------------
@@ -1240,6 +1280,45 @@ def _nutrition_payload(macros: Dict[str, float]) -> Dict[str, str]:
             for key, field in mapping.items() if key in macros}
 
 
+NOTE_TITLE = "Macros per 100g"
+
+
+def _macro_note(verdict: 'Verdict') -> Optional[dict]:
+    """A per-100g note to sit alongside Mealie's per-serving panel."""
+    if not verdict.per100:
+        return None
+    p = verdict.per100
+    line = (f"{p['kcal']} kcal · protein {p['protein']}g · carbs {p['carb']}g · "
+            f"fat {p['fat']}g · fibre {p['fibre']}g")
+    if verdict.serving_grams:
+        line += f"\n\nServing size ≈ {verdict.serving_grams}g raw ingredients."
+    if verdict.estimated:
+        line += (f"\n\nEstimated from the ingredient list "
+                 f"({int(verdict.coverage * 100)}% of ingredients recognised); "
+                 f"raw weight, before any cooking loss.")
+    else:
+        line += ("\n\nScaled from the recipe's published per-serving figures "
+                 "using estimated ingredient weights; raw weight, before any "
+                 "cooking loss.")
+    return {"title": NOTE_TITLE, "text": line}
+
+
+def _notes_with_macros(session, slug: str, verdict: 'Verdict') -> Optional[list]:
+    """Add (or refresh) our note without discarding the recipe's own."""
+    note = _macro_note(verdict)
+    if not note:
+        return None
+    try:
+        r = session.get(f"{MEALIE_URL}/api/recipes/{slug}",
+                        headers=_headers(), timeout=20)
+        existing = r.json().get('notes') or [] if r.status_code == 200 else []
+    except Exception:
+        existing = []
+    kept = [n for n in existing
+            if isinstance(n, dict) and n.get('title') != NOTE_TITLE]
+    return kept + [note]
+
+
 def _settings_with_nutrition(session, slug: str) -> Optional[dict]:
     """Mealie hides the nutrition panel unless the recipe's showNutrition flag
     is set, so read the current settings and flip just that one."""
@@ -1271,6 +1350,9 @@ def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
     if WRITE_NUTRITION and verdict.macros:
         payload['nutrition'] = _nutrition_payload(verdict.macros)
         payload['settings'] = _settings_with_nutrition(session, slug)
+        notes = _notes_with_macros(session, slug, verdict)
+        if notes is not None:
+            payload['notes'] = notes
 
     if SET_CUISINE and verdict.categories:
         cats = [c for c in (_ensure_category(session, n)
