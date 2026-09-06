@@ -102,35 +102,79 @@ BAND_BASIS = os.getenv('BAND_BASIS', 'both').strip().lower()
 
 # Phrases that LOOK animal but are not. Stripped from the line before scanning.
 SAFE_PHRASES = [
-    r'\b(vegan|plant[- ]based|dairy[- ]free|egg[- ]free|non[- ]dairy|meat[- ]free|'
+    # --- qualifiers: "vegan beef", "non-dairy milk", "mock duck" -----------
+    # nondairy / non dairy / non-dairy all match; the trailing run swallows the
+    # noun and a word or two after it ("vegan beef crumbles").
+    r'\b(vegan|plant[- ]?based|dairy[- ]?free|egg[- ]?free|milk[- ]?free|'
+    r'non[- ]?dairy|meat[- ]?free|meatless|eggless|veggie|'
     r'vegetarian|mock|faux|imitation|substitute for|instead of|no\b)\s+[\w\- ]{0,20}',
-    r'\b(peanut|almond|cashew|nut|seed|sunflower|apple|cocoa|coconut|shea|tahini)\s+butter\b',
+ 
+    # "beef-style strips", "chicken-flavour bouillon", "egg substitute"
+    r'\b(beef|pork|chicken|turkey|bacon|ham|fish|prawn|tuna|cheese|egg|butter|'
+    r'cream|milk|honey)[- ]?(style|flavou?r(ed|ing)?|substitutes?|alternatives?|'
+    r'analogues?|replacers?|replacements?)\b',
+ 
+    # --- brands that only make plant-based products -----------------------
+    # The optional trailing product word catches "Violife cheddar", "Earth
+    # Balance butter", "Field Roast chorizo", "Beyond Meat ground meat".
+    r'\b(beyond\s*(meat|burgers?|sausages?|beef|chicken|steaks?)?|'
+    r'impossible(\s+(burgers?|beef|sausages?|chicken))?|'
+    r'violife|oatly|alpro|miyoko\'?s|daiya|tofurk?y|quorn|'
+    r'follow\s+your\s+heart|earth\s+balance|so\s+delicious|kite\s+hill|'
+    r'field\s+roast|gardein|upton\'?s|just\s+egg|'
+    r'linda\s+mc\s?cartney|richmond\s+meat[- ]?free|this\s+isn\'?t|'
+    r'vivera|garden\s+gourmet|squeaky\s+bean|the\s+vegetarian\s+butcher|'
+    r'naturli|sheese|nush|plenish|rude\s+health|minor\s+figures|'
+    r'elmlea\s+plant|flora\s+plant)\b'
+    r'(\s+(\w+\s+)?(butter(milk)?|cheeses?|cheddar|mozzarella|parmesan|feta|'
+    r'ricotta|gouda|brie|halloumi|queso|cotija|milk|creams?|creamer|yogh?urt|'
+    r'mayo(nnaise)?|eggs?|sausages?|bacon|ham|mince|ground|beef|pork|chicken|'
+    r'turkey|duck|meat(balls?)?|chorizo|pepperoni|salami|steaks?|ribs?|jerky|'
+    r'prawns?|shrimps?|tuna|fish|slices?|shreds?|blocks?|strips?|pieces?|'
+    r'fillets?|nuggets?|patt(y|ies)|burgers?|roasts?|deli))?',
+ 
+    # --- nut and seed butters ---------------------------------------------
+    r'\b(peanut|almond|cashew|nut|seed|sunflower|apple|cocoa|cacao|coconut|shea|'
+    r'tahini|hazelnut|macadamia|walnut|pecan|pumpkin\s+seed|sesame)\s+butter\b',
     r'\bbutter(nut|head|milk powder|fly|cup squash)\b',
     r'\bbutter\s+(bean|lettuce)s?\b',
+    r'\bbutter\s*less\b',
+ 
+    # --- plant milks, creams, yoghurts and cheeses ------------------------
     r'\b(coconut|almond|soy|soya|oat|rice|cashew|hemp|flax|pea|macadamia|walnut|'
-    r'hazelnut|quinoa|nut)\s+(milk|cream|yogh?urt|yoghurt|creamer)\b',
+    r'hazelnut|quinoa|spelt|potato|tiger\s*nut|sesame|nut)\s+'
+    r'(milk|creams?|creamer|yogh?urt|cheeses?|whipping\s+cream)\b',
     r'\bmilk\s+thistle\b',
     r'\bcream\s+of\s+(tartar|wheat)\b',
     r'\bcreamed\s+(corn|spinach)\b',
-    r'\begg\s*plant\b|\baubergine\b',
-    r'\b(flax|chia|aquafaba|tofu)\s+egg\b|\begg\s+replacer\b',
-    r'\bchick\s*pea\w*\b|\bgarbanzo\b',
-    r'\bbeef\s*(steak)?\s+tomato\w*\b',
-    r'\b(oyster|king oyster|lion\'?s mane|chicken of the woods|hen of the woods|maitake)\s*(mushroom)?s?\b',
-    r'\bcrab\s+apple\w*\b',
-    r'\bhoney\s*(dew|crisp|nut squash|comb pattern)\b',
+    r'\bcream\s+cheese\s+style\b',
+    r'\bcashew\s+cheese\b|\bnut\s+cheese\b',
+    r'\bcream\w*\s*(texture|consistency|sauce made)\b',
     r'\bnutritional\s+yeast\b',
     r'\bcheese\s*cloth\b',
-    r'\bcashew\s+cheese\b|\bnut\s+cheese\b',
-    r'\bcream\s+cheese\s+style\b',
+ 
+    # --- eggs ---------------------------------------------------------------
+    r'\begg\s*plant\b|\baubergine\b',
+    r'\b(flax|chia|aquafaba|tofu|banana|apple\s*sauce|applesauce)\s+eggs?\b',
+    r'\begg\s+replacers?\b',
+ 
+    # --- produce and pantry items that read as animal terms ----------------
+    r'\bchick\s*pea\w*\b|\bgarbanzo\b',
+    r'\bbeef\s*(steak)?\s+tomato\w*\b',
+    # "oyster" alone must keep its mushroom, or "oyster sauce" slips through
+    r'\b(king\s+)?oyster\s+mushrooms?\b',
+    r'\b(lion\'?s mane|chicken of the woods|hen of the woods|maitake)\s*(mushroom)?s?\b',
+    r'\bcrab\s+apple\w*\b',
+    r'\bhoney\s*(dew|crisp|nut squash|comb pattern)\b',
     r'\bsea\s*food\s*style\b',
     r'\bfish\s*less\b|\bchick\s*less\b|\bbeef\s*less\b',
     r'\bhamburger\s+(bun|roll)s?\b|\bburger\s+bun\w*\b',
     r'\bsoy\s+curls?\b',
     r'\bcoconut\s+bacon\b',
     r'\bcoconut\s+(oil|sugar|flour|water|aminos|flakes?|shreds?)\b',
-    r'\bbutter\s*less\b',
-    r'\bcream\w*\s*(texture|consistency|sauce made)\b',
+ 
+    # mayo ketchup is a Puerto Rican condiment, not an egg
+    r'\bmayo\s*[- ]?ketchup\b|\bketchup\s*[- ]?mayo\b',
 ]
 
 ANIMAL_TERMS = [
