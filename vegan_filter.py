@@ -1420,10 +1420,45 @@ def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
 
     payload = {}
 
+    # PATCH replaces a list wholesale, so anything already on the recipe that
+    # this pass doesn't know about — parsed, needs-review, can make now, the
+    # book title — would be dropped. Read the current lists and merge.
+    current = {}
+    if (TAG_RECIPES and verdict.tags) or (SET_CUISINE and verdict.categories):
+        try:
+            g = session.get(f"{MEALIE_URL}/api/recipes/{slug}",
+                            headers=_headers(), timeout=20)
+            if g.status_code == 200:
+                current = g.json()
+        except Exception as e:
+            logger.warning(f"   Could not read {slug} before tagging: {e}")
+            return False          # better to skip than to overwrite blind
+
+    # Tags this enricher owns and recomputes on every run. They are dropped
+    # from the existing list before merging, so a recipe that was carb-med and
+    # now computes as carb-high ends up with one band, not both. Everything
+    # else on the recipe — parsed, needs-review, the book title, can make now —
+    # is kept untouched.
+    _OWNED = re.compile(
+        r"^(?:carb|protein|fibre|fiber|fat)-(?:low|med|medium|high)(?:-100g)?$"
+        r"|^macros-(?:unknown|estimated)$"
+        r"|^vegan-unverified$",
+        re.I)
+
+    def _merge(existing, new_objs, owned=None):
+        out = [o for o in (existing or [])
+               if not (owned and owned.match((o.get('name') or '').strip()))]
+        have = {(o.get('name') or '').strip().lower() for o in out}
+        for o in new_objs:
+            if (o.get('name') or '').strip().lower() not in have:
+                out.append(o)
+                have.add((o.get('name') or '').strip().lower())
+        return out
+
     if TAG_RECIPES and verdict.tags:
         tag_objs = [t for t in (_ensure_tag(session, n) for n in verdict.tags) if t]
         if tag_objs:
-            payload['tags'] = tag_objs
+            payload['tags'] = _merge(current.get('tags'), tag_objs, _OWNED)
 
     if WRITE_NUTRITION and verdict.macros:
         payload['nutrition'] = _nutrition_payload(verdict.macros)
@@ -1436,7 +1471,7 @@ def apply_to_mealie(session, slug: str, verdict: 'Verdict') -> bool:
         cats = [c for c in (_ensure_category(session, n)
                             for n in verdict.categories) if c]
         if cats:
-            payload['recipeCategory'] = cats
+            payload['recipeCategory'] = _merge(current.get('recipeCategory'), cats)
 
     if not payload:
         return False

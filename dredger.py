@@ -531,6 +531,50 @@ class ImportManager:
         self.working_endpoint = None
         self.last_slug = None
 
+    def _verify_import(self, slug, url):
+        """True when Mealie actually got a recipe; deletes the stub otherwise.
+
+        Also writes the source URL onto the recipe. Mealie only sets orgURL when
+        its own scrape succeeds, so without this a recipe that later needs
+        repairing has no record of where it came from.
+        """
+        if not slug:
+            return False, "no slug returned"
+        headers = {"Authorization": f"Bearer {MEALIE_API_TOKEN}"}
+        try:
+            g = self.session.get(f"{MEALIE_URL}/api/recipes/{slug}",
+                                 headers=headers, timeout=IMPORT_TIMEOUT)
+            if g.status_code >= 400:
+                return False, f"could not read back ({g.status_code})"
+            d = g.json()
+        except Exception as e:
+            return False, f"could not read back ({e})"
+
+        ings = d.get("recipeIngredient") or []
+        if ings and isinstance(ings[0], dict):
+            real = [i for i in ings
+                    if (i.get("note") or i.get("originalText") or "").strip()]
+        else:
+            real = list(ings)
+        # a stub has nothing, or Mealie's single placeholder line. Two is the
+        # lowest count a genuine recipe plausibly has.
+        if len(real) < 2:
+            try:
+                self.session.delete(f"{MEALIE_URL}/api/recipes/{slug}",
+                                    headers=headers, timeout=IMPORT_TIMEOUT)
+            except Exception:
+                pass
+            return False, "scrape produced no ingredients"
+
+        if not (d.get("orgURL") or "").strip():
+            try:
+                self.session.patch(f"{MEALIE_URL}/api/recipes/{slug}",
+                                   headers=headers, json={"orgURL": url},
+                                   timeout=IMPORT_TIMEOUT)
+            except Exception:
+                pass
+        return True, None
+
     def import_to_mealie(self, url: str) -> Tuple[bool, Optional[str]]:
         if self.dry_run:
             logger.info(f"   [DRY RUN] Would import to Mealie: {url}")
@@ -566,12 +610,22 @@ class ImportManager:
                     logger.debug(f"   🎯 Auto-Detected Mealie API: {endpoint}")
 
                 if r.status_code in [200, 201]:
-                    logger.info(f"   ✅ [Mealie] Imported: {url}")
                     try:
                         body = r.json()
                         self.last_slug = body if isinstance(body, str) else body.get("slug")
                     except Exception:
                         self.last_slug = None
+
+                    # Mealie answers 201 even when recipe_scrapers could not
+                    # read the page: it creates a stub carrying a title derived
+                    # from the URL and nothing else. Those stubs are
+                    # indistinguishable from real recipes in the library, so
+                    # check before calling this a success.
+                    ok, why = self._verify_import(self.last_slug, url)
+                    if not ok:
+                        logger.warning(f"   ⚠️ [Mealie] Empty import removed: {url} ({why})")
+                        return False, why
+                    logger.info(f"   ✅ [Mealie] Imported: {url}")
                     return True, None
                 elif r.status_code == 409:
                     logger.info(f"   ⚠️ [Mealie] Duplicate: {url}")
